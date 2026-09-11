@@ -14,7 +14,14 @@
 cameras:
   ros__parameters:
     chest_camera: realsense        # realsense | v4l2
-    wrist_driver: usb_cam          # usb_cam (MJPG, recomendado) | v4l2 (YUYV)
+    # v4l2 (YUYV) medido em ~3-4ms de atraso (camera->topico); usb_cam (MJPG)
+    # tem um bug de buffering interno que prende ~440-820ms de atraso fixo
+    # por camera (confirmado isolando com V4L2 puro, sem ROS: o kernel/USB
+    # entrega o frame na hora, o atraso e' introduzido pelo no' usb_cam).
+    # As 2 C270 juntas em YUYV nao mostraram tearing nem perda de fps num
+    # teste de 12s (~28Hz cada) -- mas isso foi com cena estatica; observar
+    # tearing durante movimento real antes de confiar 100%.
+    wrist_driver: v4l2             # v4l2 (YUYV, recomendado) | usb_cam (MJPG, ~500-800ms de atraso -- bug conhecido)
     chest_serial: ""                # vazio = aceita a RealSense que tiver conectada
     chest_device: "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:10.4:1.0-video-index0"
     left_wrist_device: "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.0-video-index0"
