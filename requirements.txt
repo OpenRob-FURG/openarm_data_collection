@@ -1,0 +1,13 @@
+# O episode_recorder importa rclpy (ROS Jazzy / Python 3.12) E lerobot no mesmo
+# processo. O lerobot exige Python >= 3.12 e NumPy >= 2, e o rclpy do Jazzy é
+# compilado para Python 3.12 — então usamos um venv 3.12 com --system-site-packages.
+#
+# Setup (uma vez):
+#   python3.12 -m venv --system-site-packages ~/openarm_ws/.venv312
+#   ~/openarm_ws/.venv312/bin/pip install "lerobot[dataset]==0.6.1" "scipy>=1.13"
+#
+# O launch chama o gravador com esse interpretador (arg `python:=`).
+# NÃO instalar cv_bridge aqui: ele quebra sob NumPy 2 (usamos image_utils.py).
+
+lerobot[dataset]==0.6.1
+scipy>=1.13

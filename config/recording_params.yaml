@@ -1,0 +1,103 @@
+# Parâmetros do pipeline de coleta.
+
+# Devices de câmera — lido pelo launch (data_collection.launch.py). Precisa do
+# `ros__parameters:` mesmo não sendo um nó de verdade: o parser de params do
+# ROS exige essa estrutura em TODO bloco do arquivo, não só no que cada nó usa
+# — sem isso o arquivo inteiro falha ao carregar (derruba episode_recorder e
+# home_mover juntos). As 2 C270 andam desconectando/reconectando sozinhas
+# (cabo/hub com mau contato) e trocando de porta USB quando isso acontece — se
+# a gravação vier com a câmera errada, confere:
+#   ls -l /dev/v4l/by-path/
+# e tira uma foto de teste de cada video antes de editar aqui.
+# Última checagem: 2026-09-11 — usb-0:4 = pulso ESQUERDO,
+# usb-0:10.4 = pulso DIREITO (vê o caderno Sicredi).
+cameras:
+  ros__parameters:
+    chest_camera: realsense        # realsense | v4l2
+    wrist_driver: usb_cam          # usb_cam (MJPG, recomendado) | v4l2 (YUYV)
+    chest_serial: ""                # vazio = aceita a RealSense que tiver conectada
+    chest_device: "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:10.4:1.0-video-index0"
+    left_wrist_device: "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.0-video-index0"
+    right_wrist_device: "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:10.4:1.0-video-index0"
+
+episode_recorder:
+  ros__parameters:
+    task_name: "pegar o copo vermelho"
+    dataset_root: "/home/popzap-lab/datasets/openarm_bimanual_vr"
+    repo_id: "furg/openarm_bimanual_vr"
+    fps: 30
+
+    image_height: 480
+    image_width: 640
+    min_episode_frames: 15
+    sync_slop: 0.033
+    cameras_compressed: false
+
+    # unidades gravadas. 1.0 = radianos (como o /joint_states publica).
+    # Para gravar em graus (convenção do OpenArm LeRobot CAN): 57.29578
+    arm_angle_scale: 1.0
+    gripper_scale: 1.0
+    gripper_offset: 0.0
+
+    # juntas dos braços no /joint_states e nos comandos dos controllers
+    left_arm_joint_names:
+      - openarm_left_joint1
+      - openarm_left_joint2
+      - openarm_left_joint3
+      - openarm_left_joint4
+      - openarm_left_joint5
+      - openarm_left_joint6
+      - openarm_left_joint7
+    right_arm_joint_names:
+      - openarm_right_joint1
+      - openarm_right_joint2
+      - openarm_right_joint3
+      - openarm_right_joint4
+      - openarm_right_joint5
+      - openarm_right_joint6
+      - openarm_right_joint7
+    left_gripper_joint_name: openarm_left_finger_joint1
+    right_gripper_joint_name: openarm_right_finger_joint1
+
+    cam_chest_topic: /cam_chest/color/image_raw
+    left_wrist_topic: /left_wrist/image_raw
+    right_wrist_topic: /right_wrist/image_raw
+
+    left_arm_cmd_topic: /left_joint_trajectory_controller/joint_trajectory
+    right_arm_cmd_topic: /right_joint_trajectory_controller/joint_trajectory
+    left_gripper_cmd_topic: /left_gripper_controller/joint_trajectory
+    right_gripper_cmd_topic: /right_gripper_controller/joint_trajectory
+
+home_mover:
+  ros__parameters:
+    left_arm_joint_names:
+      - openarm_left_joint1
+      - openarm_left_joint2
+      - openarm_left_joint3
+      - openarm_left_joint4
+      - openarm_left_joint5
+      - openarm_left_joint6
+      - openarm_left_joint7
+    right_arm_joint_names:
+      - openarm_right_joint1
+      - openarm_right_joint2
+      - openarm_right_joint3
+      - openarm_right_joint4
+      - openarm_right_joint5
+      - openarm_right_joint6
+      - openarm_right_joint7
+    left_arm_cmd_topic: /left_joint_trajectory_controller/joint_trajectory
+    right_arm_cmd_topic: /right_joint_trajectory_controller/joint_trajectory
+    # Pose de home / "ready": cotovelo (joint4) DOBRADO ~57° de propósito — braço
+    # reto (tudo 0) fica em singularidade e o IK do teleop não consegue mexer o
+    # cotovelo depois. Ordem: joint1..joint7.
+    left_home_positions:  [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    right_home_positions: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    move_duration_sec: 4.0
+    waypoint_dt: 0.05   # 1 waypoint a cada 50 ms na trajetória de home
+    home_on_start: true       # leva pra pose de ready ~4s após subir (sai da singularidade)
+    startup_delay_sec: 4.0
+    # false: só vai pra home quando o recorder manda (/data_collection/go_home,
+    # depois de salvar). true: responde direto ao botão B do XR também (use se
+    # rodar o home_mover sem o episode_recorder).
+    respond_to_xr_button: false
