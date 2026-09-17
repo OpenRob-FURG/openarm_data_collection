@@ -18,6 +18,7 @@ Args úteis:
     right_wrist_device:=/dev/videoN  webcam do pulso direito
     python:=/path/to/python  interpretador do gravador (precisa de rclpy + lerobot)
     home_mover:=false        não sobe o home_mover
+    teleop:=false            não sobe o bimanual_teleop
 """
 import os
 
@@ -128,23 +129,46 @@ def _setup(context, *_a, **_kw):
         condition=IfCondition(LaunchConfiguration("home_mover")),
     )
 
-    return [camera_group, recorder, home_mover]
+    # Sem `prefix`: o teleop roda no python do sistema. Só o recorder precisa do
+    # .venv312 (lerobot). Os dois no mesmo pacote, interpretadores diferentes.
+    teleop = Node(
+        package=_PKG, executable="bimanual_teleop", name="bimanual_teleop",
+        output="screen", emulate_tty=True,
+        condition=IfCondition(LaunchConfiguration("teleop")),
+    )
+
+    # Alinha o referencial do Quest com o do robô. Sem esta TF o teleop não sai
+    # do lugar e só emite um warn com throttle de 2s — por isso ela mora aqui, e
+    # não num processo solto de terminal.
+    xr_tf = Node(
+        package="tf2_ros", executable="static_transform_publisher",
+        name="xr_local_to_world", output="screen",
+        arguments=[
+            "--frame-id", cfg("xr_parent_frame"),
+            "--child-frame-id", cfg("xr_child_frame"),
+            "--x", cfg("xr_x"), "--y", cfg("xr_y"), "--z", cfg("xr_z"),
+            "--roll", cfg("xr_roll"), "--pitch", cfg("xr_pitch"),
+            "--yaw", cfg("xr_yaw"),
+        ],
+        condition=IfCondition(LaunchConfiguration("xr_tf")),
+    )
+
+    return [camera_group, recorder, home_mover, teleop, xr_tf]
 
 
-def _camera_defaults():
-    """Lê o bloco `cameras:` de config/recording_params.yaml. Editar as portas
-    de câmera é só mexer nesse yaml — não precisa tocar neste arquivo nem
-    rebuildar. CLI (`ros2 launch ... left_wrist_device:=...`) ainda tem
-    prioridade sobre o yaml."""
+def _yaml_block(key):
+    """Lê um bloco de config/recording_params.yaml pra usar como default de
+    argumento de launch. Editar o yaml não pede rebuild, e o CLI
+    (`ros2 launch ... left_wrist_device:=...`) continua tendo prioridade."""
     import yaml
     pkg = get_package_share_directory(_PKG)
     params_path = os.path.join(pkg, "config", "recording_params.yaml")
     try:
         with open(params_path) as f:
             data = yaml.safe_load(f) or {}
-        return data.get("cameras", {}).get("ros__parameters", {})
+        return data.get(key, {}).get("ros__parameters", {})
     except (OSError, yaml.YAMLError) as exc:
-        print(f"[data_collection.launch] aviso: não li 'cameras:' de "
+        print(f"[data_collection.launch] aviso: não li '{key}:' de "
               f"{params_path} ({exc}); usando defaults embutidos.")
         return {}
 
@@ -185,5 +209,6 @@ def generate_launch_description():
                               default_value=str(cams.get("right_wrist_device", ""))),
         DeclareLaunchArgument("python", default_value=default_python),
         DeclareLaunchArgument("home_mover", default_value="true"),
+        DeclareLaunchArgument("teleop", default_value="true"),
         OpaqueFunction(function=_setup),
     ])

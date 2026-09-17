@@ -2,7 +2,8 @@
 
 Fontes ROS:
   * /joint_states  (sensor_msgs/JointState)  -> observation.state (16 dims)
-  * comandos dos controllers (trajectory_msgs/JointTrajectory) -> action (16 dims)
+  * braco: comando do forward_position_controller (std_msgs/Float64MultiArray)
+    garra: controller_state do gripper_controller (control_msgs)  -> action (16 dims)
   * 3 câmeras (sensor_msgs/Image ou CompressedImage) -> observation.images.*
 
 Layout do vetor de 16 dims (igual ao bi_openarm_follower do OpenArm LeRobot):
@@ -19,9 +20,9 @@ import numpy as np
 import rclpy
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rclpy.node import Node
+from control_msgs.msg import JointTrajectoryControllerState
 from sensor_msgs.msg import CompressedImage, Image, JointState
-from std_msgs.msg import Empty
-from trajectory_msgs.msg import JointTrajectory
+from std_msgs.msg import Empty, Float64MultiArray
 
 from openarm_data_collection.image_utils import to_dataset_frame
 from openarm_data_collection.lerobot_writer import LeRobotWriter
@@ -69,14 +70,21 @@ class EpisodeRecorder(Node):
         cam_rw = p("right_wrist_topic", "/right_wrist/image_raw").value
         cam_compressed = bool(p("cameras_compressed", False).value)
 
+        # O teleop comanda o braço pelo forward_position_controller, que publica
+        # Float64MultiArray (sem nomes de junta) — daí o par tópico/nomes abaixo.
+        # Pôr aqui um tópico de JointTrajectory faria o recorder não ver comando
+        # nenhum e o `action` cair no fallback, virando cópia do `state`.
         left_arm_cmd = p("left_arm_cmd_topic",
-                         "/left_joint_trajectory_controller/joint_trajectory").value
+                         "/left_forward_position_controller/commands").value
         right_arm_cmd = p("right_arm_cmd_topic",
-                          "/right_joint_trajectory_controller/joint_trajectory").value
+                          "/right_forward_position_controller/commands").value
+        # Garra: controller_state, não o tópico de comando. O teleop manda a
+        # garra por *action*, o home_mover por tópico — e o `reference` é o
+        # setpoint que o controller segura em qualquer um dos casos.
         left_grip_cmd = p("left_gripper_cmd_topic",
-                          "/left_gripper_controller/joint_trajectory").value
+                          "/left_gripper_controller/controller_state").value
         right_grip_cmd = p("right_gripper_cmd_topic",
-                           "/right_gripper_controller/joint_trajectory").value
+                           "/right_gripper_controller/controller_state").value
 
         # ---- dataset --------------------------------------------------
         names = feature_names(self.slots)
@@ -107,8 +115,15 @@ class EpisodeRecorder(Node):
         # ---- publishers / subs -------------------------------------
         self.home_trigger_pub = self.create_publisher(Empty, "/data_collection/go_home", 1)
 
-        for topic in (left_arm_cmd, right_arm_cmd, left_grip_cmd, right_grip_cmd):
-            self.create_subscription(JointTrajectory, topic, self._on_command, 10)
+        for topic, joint_names in ((left_arm_cmd, arm_joints["left"]),
+                                   (right_arm_cmd, arm_joints["right"])):
+            self.create_subscription(
+                Float64MultiArray, topic,
+                lambda msg, n=joint_names: self._on_array_command(msg, n), 10)
+
+        for topic in (left_grip_cmd, right_grip_cmd):
+            self.create_subscription(
+                JointTrajectoryControllerState, topic, self._on_controller_state, 10)
 
         img_type = CompressedImage if cam_compressed else Image
         sub_js = Subscriber(self, JointState, "/joint_states")
@@ -129,11 +144,14 @@ class EpisodeRecorder(Node):
             f"{self.writer.episodes_saved}. A=start B=stop X(long)=discard.")
 
     # ------------------------------------------------------------------
-    def _on_command(self, msg: JointTrajectory):
-        if not msg.points:
-            return
-        positions = msg.points[-1].positions
-        for name, value in zip(msg.joint_names, positions):
+    def _on_array_command(self, msg: Float64MultiArray, names: list[str]):
+        # Float64MultiArray não carrega nomes: a ordem do array é a mesma do
+        # `joints:` do forward_position_controller, ou seja joint1..joint7.
+        for name, value in zip(names, msg.data):
+            self._cmd[name] = float(value)
+
+    def _on_controller_state(self, msg: JointTrajectoryControllerState):
+        for name, value in zip(msg.joint_names, msg.reference.positions):
             self._cmd[name] = float(value)
 
     def _on_button_event(self, event: RecordingEvent):

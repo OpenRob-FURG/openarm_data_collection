@@ -23,13 +23,13 @@ cameras:
     # tearing durante movimento real antes de confiar 100%.
     wrist_driver: v4l2             # v4l2 (YUYV, recomendado) | usb_cam (MJPG, ~500-800ms de atraso -- bug conhecido)
     chest_serial: ""                # vazio = aceita a RealSense que tiver conectada
-    chest_device: "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:10.4:1.0-video-index0"
-    left_wrist_device: "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:4:1.0-video-index0"
-    right_wrist_device: "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:10.4:1.0-video-index0"
+    chest_device: "/dev/video4"
+    left_wrist_device: "/dev/video8"
+    right_wrist_device: "/dev/video6"
 
 episode_recorder:
   ros__parameters:
-    task_name: "pegar o copo vermelho"
+    task_name: ""
     dataset_root: "/home/popzap-lab/datasets/openarm_bimanual_vr"
     repo_id: "furg/openarm_bimanual_vr"
     fps: 30
@@ -70,10 +70,13 @@ episode_recorder:
     left_wrist_topic: /left_wrist/image_raw
     right_wrist_topic: /right_wrist/image_raw
 
-    left_arm_cmd_topic: /left_joint_trajectory_controller/joint_trajectory
-    right_arm_cmd_topic: /right_joint_trajectory_controller/joint_trajectory
-    left_gripper_cmd_topic: /left_gripper_controller/joint_trajectory
-    right_gripper_cmd_topic: /right_gripper_controller/joint_trajectory
+    # Braço: Float64MultiArray do forward_position_controller (é o que o
+    # bimanual_teleop publica). Garra: controller_state, que expõe o setpoint
+    # independente de o goal ter chegado por action (teleop) ou tópico.
+    left_arm_cmd_topic: /left_forward_position_controller/commands
+    right_arm_cmd_topic: /right_forward_position_controller/commands
+    left_gripper_cmd_topic: /left_gripper_controller/controller_state
+    right_gripper_cmd_topic: /right_gripper_controller/controller_state
 
 home_mover:
   ros__parameters:
