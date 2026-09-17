@@ -19,6 +19,12 @@ Args úteis:
     python:=/path/to/python  interpretador do gravador (precisa de rclpy + lerobot)
     home_mover:=false        não sobe o home_mover
     teleop:=false            não sobe o bimanual_teleop
+    xr_tf:=false             não publica a TF do referencial do VR (use quando
+                             já houver outro publisher desse par de frames)
+    xr_x:=.. xr_yaw:=..      sobrescrevem o alinhamento do VR pra uma sessão;
+                             o valor de montagem fica no bloco `xr_tf:` do yaml
+                             (também xr_y, xr_z, xr_roll, xr_pitch,
+                             xr_parent_frame, xr_child_frame)
 """
 import os
 
@@ -176,7 +182,8 @@ def _yaml_block(key):
 def generate_launch_description():
     default_python = os.path.join(
         os.path.expanduser("~"), "openarm_ws", ".venv312", "bin", "python")
-    cams = _camera_defaults()
+    cams = _yaml_block("cameras")
+    xr = _yaml_block("xr_tf")
     # se o yaml não tiver o bloco `cameras:` (ou falhar ao ler), cai pro último
     # mapeamento conhecido em vez de silenciosamente virar device vazio.
     bp = "/dev/v4l/by-path/pci-0000:00:14.0-usb-0:{}:1.0-video-index0"
@@ -210,5 +217,12 @@ def generate_launch_description():
         DeclareLaunchArgument("python", default_value=default_python),
         DeclareLaunchArgument("home_mover", default_value="true"),
         DeclareLaunchArgument("teleop", default_value="true"),
+        DeclareLaunchArgument("xr_tf", default_value="true"),
+        DeclareLaunchArgument("xr_parent_frame",
+                              default_value=str(xr.get("parent_frame", "world"))),
+        DeclareLaunchArgument("xr_child_frame",
+                              default_value=str(xr.get("child_frame", "xr_local"))),
+        *[DeclareLaunchArgument(f"xr_{k}", default_value=str(xr.get(k, 0.0)))
+          for k in ("x", "y", "z", "roll", "pitch", "yaw")],
         OpaqueFunction(function=_setup),
     ])
