@@ -27,6 +27,29 @@ cameras:
     left_wrist_device: "/dev/video8"
     right_wrist_device: "/dev/video6"
 
+# Alinhamento do referencial do VR com o do robô — lido pelo launch, igual ao
+# bloco `cameras:` acima. O bimanual_teleop transforma toda pose do Quest pra
+# openarm_body_link0 passando por aqui; sem esta TF ele não sai do lugar e só
+# emite um warn com throttle de 2s ("Falha ao transformar pose VR").
+#
+# Pai = `world` de propósito, não o base_link: a origem do XR é um lugar físico
+# da sala. Como a junta world->openarm_body_link0 é fixa com origem identidade,
+# hoje os dois dariam o mesmo número — a diferença só aparece se o robô for
+# remontado deslocado, e aí `world` é que continua certo.
+#
+# xr_tf:=false no launch quando já houver outro publisher deste par de frames:
+# dois publishers do mesmo par em /tf_static conflitam.
+xr_tf:
+  ros__parameters:
+    parent_frame: world
+    child_frame: xr_local
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0
+
 episode_recorder:
   ros__parameters:
     task_name: ""
