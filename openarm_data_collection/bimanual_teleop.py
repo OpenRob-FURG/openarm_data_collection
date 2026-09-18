@@ -339,8 +339,16 @@ class BiArmTeleopIK(Node):
             if not arm.has_hardware_state:
                 continue
             with self.lock:
-                if arm.active:
-                    arm.current_pos = (1 - arm.smoothing) * arm.current_pos + arm.smoothing * arm.target_pos
+                # Só comanda com a embreagem engatada. Publicando sempre, o
+                # teleop mandava current_pos (congelado na pose de startup) a
+                # 100 Hz e sobrescrevia os waypoints do home_mover, que sai a
+                # 20 Hz — o braço ficava preso e o home nunca acontecia. Com a
+                # embreagem solta o ForwardCommandController segura o último
+                # comando sozinho, e o engate ressincroniza current_pos com o
+                # hardware, então não tem tranco.
+                if not arm.active:
+                    continue
+                arm.current_pos = (1 - arm.smoothing) * arm.current_pos + arm.smoothing * arm.target_pos
                 msg = Float64MultiArray()
                 msg.data = arm.current_pos.tolist()
                 arm.arm_pub.publish(msg)

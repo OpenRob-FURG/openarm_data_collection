@@ -20,6 +20,7 @@ import numpy as np
 import rclpy
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from control_msgs.msg import JointTrajectoryControllerState
 from sensor_msgs.msg import CompressedImage, Image, JointState
 from std_msgs.msg import Empty, Float64MultiArray
@@ -115,11 +116,17 @@ class EpisodeRecorder(Node):
         # ---- publishers / subs -------------------------------------
         self.home_trigger_pub = self.create_publisher(Empty, "/data_collection/go_home", 1)
 
+        # BEST_EFFORT: o bimanual_teleop publica o comando do braço a 100 Hz em
+        # BEST_EFFORT. Um sub RELIABLE é incompatível com esse publisher e o
+        # recorder não recebia NADA dele ("offering incompatible QoS") — a
+        # coluna de ação do dataset ficava só com o que o home_mover mandava.
+        # BEST_EFFORT aceita os dois (um pub RELIABLE serve sub BEST_EFFORT).
+        cmd_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         for topic, joint_names in ((left_arm_cmd, arm_joints["left"]),
                                    (right_arm_cmd, arm_joints["right"])):
             self.create_subscription(
                 Float64MultiArray, topic,
-                lambda msg, n=joint_names: self._on_array_command(msg, n), 10)
+                lambda msg, n=joint_names: self._on_array_command(msg, n), cmd_qos)
 
         for topic in (left_grip_cmd, right_grip_cmd):
             self.create_subscription(
