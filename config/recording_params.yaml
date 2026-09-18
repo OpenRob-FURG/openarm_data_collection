@@ -119,8 +119,14 @@ home_mover:
       - openarm_right_joint5
       - openarm_right_joint6
       - openarm_right_joint7
-    left_arm_cmd_topic: /left_joint_trajectory_controller/joint_trajectory
-    right_arm_cmd_topic: /right_joint_trajectory_controller/joint_trajectory
+    # O bringup só spawna os *_forward_position_controller quando sobe com
+    # robot_controller:=forward_position_controller — que é obrigatório pro
+    # bimanual_teleop, que tem esse tópico fixo no código. Nesse modo os JTC do
+    # braço nem existem. Em forward_position o home sai waypoint a waypoint,
+    # porque esse controller não interpola: uma mensagem só seria um degrau.
+    arm_command_mode: forward_position
+    left_arm_cmd_topic: /left_forward_position_controller/commands
+    right_arm_cmd_topic: /right_forward_position_controller/commands
     # Pose de home / "ready": cotovelo (joint4) DOBRADO ~57° de propósito — braço
     # reto (tudo 0) fica em singularidade e o IK do teleop não consegue mexer o
     # cotovelo depois. Ordem: joint1..joint7.
