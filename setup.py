@@ -33,7 +33,6 @@ setup(
             'home_mover = openarm_data_collection.home_mover:main',
             'validate_dataset = openarm_data_collection.validate_dataset:main',
             'dataset_replay = openarm_data_collection.dataset_replay:main',
-            'quest_arm_bridge = openarm_data_collection.quest_arm_bridge:main',
         ],
     },
 )
