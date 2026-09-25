@@ -53,7 +53,7 @@ xr_tf:
 episode_recorder:
   ros__parameters:
     task_name: ""
-    dataset_root: "/home/popzap-lab/datasets/openarm_bimanual_vr"
+    dataset_root: "~/datasets/openarm_bimanual_vr"
     repo_id: "furg/openarm_bimanual_vr"
     fps: 30
 
@@ -130,8 +130,12 @@ home_mover:
     # Pose de home / "ready": cotovelo (joint4) DOBRADO ~57° de propósito — braço
     # reto (tudo 0) fica em singularidade e o IK do teleop não consegue mexer o
     # cotovelo depois. Ordem: joint1..joint7.
-    left_home_positions:  [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
-    right_home_positions: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    # Medido no dataset gravado (1o frame de cada episodio): left j1=0.962
+    # j4=2.208 | right j1=-0.965 j4=2.208. Sao ESTAS as poses que a policy
+    # viu no treino -- comecar em outra pose poe as cameras fora da
+    # distribuicao e a inferencia degrada.
+    left_home_positions:  [1.0, 0.0, 0.0, 2.3, 0.0, 0.0, 0.0]
+    right_home_positions: [-1.0, 0.0, 0.0, 2.3, 0.0, 0.0, 0.0]
     move_duration_sec: 4.0
     waypoint_dt: 0.05   # 1 waypoint a cada 50 ms na trajetória de home
     home_on_start: true       # leva pra pose de ready ~4s após subir (sai da singularidade)
@@ -139,4 +143,4 @@ home_mover:
     # false: só vai pra home quando o recorder manda (/data_collection/go_home,
     # depois de salvar). true: responde direto ao botão B do XR também (use se
     # rodar o home_mover sem o episode_recorder).
-    respond_to_xr_button: false
+    respond_to_xr_button: true
