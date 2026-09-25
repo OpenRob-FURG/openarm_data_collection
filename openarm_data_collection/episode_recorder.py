@@ -16,6 +16,8 @@ Controle por botão (TeleopXR / Meta Quest), via xr_buttons.XRButtonMonitor:
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import rclpy
 from message_filters import ApproximateTimeSynchronizer, Subscriber
@@ -38,7 +40,13 @@ class EpisodeRecorder(Node):
         # ---- parâmetros -------------------------------------------------
         p = self.declare_parameter
         self.task_name = p("task_name", "pegar o copo vermelho").value
-        self.dataset_root = p("dataset_root", "/home/popzap-lab/datasets/openarm_bimanual_vr").value
+        # O parser de parametros do ROS 2 nao expande nem `~` nem `$VAR` --
+        # a string chega literal. Expandimos aqui para o yaml poder trazer um
+        # caminho portatil ("~/datasets/...") em vez do home de uma maquina so,
+        # que virava conflito toda vez que o repo ia pro outro PC. O expandvars
+        # fica junto de graca, para apontar um disco externo via $VAR se precisar.
+        self.dataset_root = os.path.expanduser(os.path.expandvars(
+            p("dataset_root", "~/datasets/openarm_bimanual_vr").value))
         self.repo_id = p("repo_id", "furg/openarm_bimanual_vr").value
         self.fps = int(p("fps", 30).value)
 
@@ -177,7 +185,8 @@ class EpisodeRecorder(Node):
             if n < self.min_episode_frames:
                 self.writer.discard_episode()
                 self.get_logger().warn(
-                    f"episódio curto demais ({n} < {self.min_episode_frames}) — descartado")
+                    f"episódio #{self.writer.episodes_saved + 1} curto demais "
+                    f"({n} < {self.min_episode_frames}) — descartado")
             else:
                 total = self.writer.save_episode()
                 self.get_logger().info(f"💾  episódio salvo ({n} frames) | total={total}")
@@ -188,7 +197,8 @@ class EpisodeRecorder(Node):
                 return
             self.is_recording = False
             self.writer.discard_episode()
-            self.get_logger().warn("🗑️  episódio descartado")
+            self.get_logger().warn(
+                f"🗑️  episódio #{self.writer.episodes_saved + 1} descartado")
 
     # ------------------------------------------------------------------
     def _scale(self, slot, raw: float) -> float:
