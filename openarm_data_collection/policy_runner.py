@@ -44,7 +44,8 @@ este nó:
     /policy_runner/enable;
   * ao armar, faz rampa suave do estado medido até a 1ª ação (`--ramp-seconds`);
   * watchdog: sem imagem/joint_states fresco, desarma e segura a pose;
-  * `--freeze-left` (PADRÃO LIGADO) ignora as 8 dims do braço esquerdo.
+  * `--freeze-left` (padrão DESLIGADO) ignora as 8 dims do braço esquerdo
+    — ligue para uma tarefa que sabidamente não usa o braço esquerdo.
 
 Nada disso protege contra bater na mesa ou no próprio robô: colisão não existe
 nem nos limites de junta nem no rate limit. O botão de emergência é o backup.
@@ -401,19 +402,25 @@ class PolicyRunner(Node):
         return hz
 
     def _log_parado(self, act, state, por_urdf, now: float) -> None:
-        """Log de dry-run/desarmado: olha a ação CRUA da policy.
+        """Log de dry-run/desarmado: olha a ação CRUA da policy, nos DOIS braços.
 
         Tem que ser a crua: o `target` já passou pelo rate-limit, então o delta
         dele nunca passaria de --max-step e o log pareceria saudável mesmo com a
-        policy pedindo absurdo.
+        policy pedindo absurdo. E tem que ser bilateral — com freeze_left ligado
+        o esquerdo vira 0 no target de qualquer jeito, mas o CRU mostra o que a
+        policy pediria se o freeze não estivesse lá (útil pra saber se compensa
+        desligar --freeze-left numa tarefa bimanual).
         """
         if self._deve_logar(now) is None:
             return
-        direita = [s for s in self.slots if s.side == "right"]
-        pior = max(direita, key=lambda s: abs(act[s.index] - state[s.index]))
-        delta = float(act[pior.index] - state[pior.index])
+        partes = []
+        for lado, rotulo in (("right", "dir"), ("left", "esq")):
+            juntas = [s for s in self.slots if s.side == lado]
+            pior = max(juntas, key=lambda s: abs(act[s.index] - state[s.index]))
+            delta = float(act[pior.index] - state[pior.index])
+            partes.append(f"{rotulo} {pior.ros_joint} {delta:+.4f}")
         msg = (f"[{'seco' if self.args.dry_run else 'desarmado'}] ação #{self.n_actions} "
-               f"| maior delta CRU: {pior.ros_joint} {delta:+.4f} rad "
+               f"| maior delta CRU: {' | '.join(partes)} rad "
                f"(seria limitado a {self.args.max_step:.3f}/tick)")
         if por_urdf:
             msg += f" | ⚠️ FORA DO LIMITE URDF: {por_urdf}"
@@ -430,12 +437,17 @@ class PolicyRunner(Node):
         hz = self._deve_logar(now)
         if hz is None or not self.last_cmd:
             return
-        bracos = [s for s in self.slots if s.side == "right" and not s.is_gripper]
-        pedido = max(abs(act[s.index] - self.last_cmd[s.ros_joint]) for s in bracos)
-        aplicado = max(abs(target[s.ros_joint] - self.last_cmd[s.ros_joint]) for s in bracos)
-        garra = next(s for s in self.slots if s.side == "right" and s.is_gripper)
-        msg = (f"#{self.n_actions} {hz:4.1f}Hz | pediu {pedido:.4f} aplicou {aplicado:.4f} rad/tick"
-               f" | garra dir {target[garra.ros_joint]:.3f}")
+        # Bilateral: com freeze_left ligado o lado esquerdo aparece ~0 aplicado
+        # (confirma visualmente que o freeze está segurando), sem custar uma
+        # condição — o cálculo é o mesmo dos dois lados.
+        partes = []
+        for lado, rotulo in (("right", "dir"), ("left", "esq")):
+            bracos = [s for s in self.slots if s.side == lado and not s.is_gripper]
+            pedido = max(abs(act[s.index] - self.last_cmd[s.ros_joint]) for s in bracos)
+            aplicado = max(abs(target[s.ros_joint] - self.last_cmd[s.ros_joint]) for s in bracos)
+            garra = next(s for s in self.slots if s.side == lado and s.is_gripper)
+            partes.append(f"{rotulo} pediu {pedido:.4f} aplicou {aplicado:.4f} | garra {rotulo} {target[garra.ros_joint]:.3f}")
+        msg = f"#{self.n_actions} {hz:4.1f}Hz | " + " || ".join(partes)
         if por_rate:
             msg += f" | CORTADO por max_step: {len(por_rate)} junta(s)"
         if por_urdf:
@@ -532,8 +544,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="interpolação suave do estado medido até a 1ª ação, ao armar")
     seg.add_argument("--obs-timeout", type=float, default=0.5,
                      help="sem observação nova por este tempo, desarma")
-    seg.add_argument("--freeze-left", dest="freeze_left", action="store_true", default=True,
-                     help="ignora as 8 dims do braço esquerdo (padrão: ligado)")
+    seg.add_argument("--freeze-left", dest="freeze_left", action="store_true", default=False,
+                     help="ignora as 8 dims do braço esquerdo (padrão: DESLIGADO — "
+                          "ligue só se souber que a tarefa não usa o braço esquerdo)")
     seg.add_argument("--no-freeze-left", dest="freeze_left", action="store_false")
 
     inf = ap.add_argument_group("inferência")

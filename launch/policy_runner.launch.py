@@ -67,8 +67,12 @@ def _setup(context, *_a, **_kw):
     for name, flag in _FLAGS.items():
         if cfg(name).lower() in ("true", "1", "yes"):
             argv.append(flag)
-    # freeze_left é ligado por default no nó; só precisa do par negativo
-    if cfg("freeze_left").lower() in ("false", "0", "no"):
+    # Tri-estado explícito: o nó agora tem default DESLIGADO, e sem o par
+    # afirmativo aqui um "freeze_left:=true" explícito virava no-op silencioso
+    # (nunca era passado pro nó, que ficava no próprio default).
+    if cfg("freeze_left").lower() in ("true", "1", "yes"):
+        argv.append("--freeze-left")
+    elif cfg("freeze_left").lower() in ("false", "0", "no"):
         argv.append("--no-freeze-left")
 
     return [Node(
@@ -90,8 +94,9 @@ def generate_launch_description():
                               description="true = roda a policy mas não publica nos controllers"),
         DeclareLaunchArgument("auto_arm", default_value="false",
                               description="true = já começa armado (cuidado)"),
-        DeclareLaunchArgument("freeze_left", default_value="true",
-                              description="ignora as 8 dims do braço esquerdo"),
+        DeclareLaunchArgument("freeze_left", default_value="false",
+                              description="ignora as 8 dims do braço esquerdo — ligue só "
+                                          "se a tarefa sabidamente não usa o braço esquerdo"),
         DeclareLaunchArgument("device", default_value="cuda"),
         DeclareLaunchArgument("task", default_value=""),
         DeclareLaunchArgument("max_step", default_value=""),
