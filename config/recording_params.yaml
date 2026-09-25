@@ -23,8 +23,8 @@ cameras:
     # tearing durante movimento real antes de confiar 100%.
     wrist_driver: v4l2             # v4l2 (YUYV, recomendado) | usb_cam (MJPG, ~500-800ms de atraso -- bug conhecido)
     chest_serial: ""                # vazio = aceita a RealSense que tiver conectada
-    chest_device: "/dev/video4"
-    left_wrist_device: "/dev/video8"
+    chest_device: "/dev/video12"
+    left_wrist_device: "/dev/video4"
     right_wrist_device: "/dev/video6"
 
 # Alinhamento do referencial do VR com o do robô — lido pelo launch, igual ao
