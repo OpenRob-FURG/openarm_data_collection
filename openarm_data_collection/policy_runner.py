@@ -24,8 +24,13 @@ O que o nó resolve sozinho por policy:
     do ACT); nas outras é ignorado com aviso;
   * **`--n-action-steps`** funciona em qualquer policy com fila de ações.
 
+  * **`--arm right|left`** para checkpoint unimanual (ação/estado de 8 dims): a
+    policy controla só os slots daquele braço, o outro não recebe comando e só
+    as câmeras que ela consome são assinadas. Se a dimensão da ação não bater com
+    `--arm`, o nó aborta na partida com a sugestão certa.
+
 O que você precisa conferir ao trocar de policy:
-  * a dimensão da ação tem que bater com o layout de 16 dims (`joint_layout`);
+  * a dimensão da ação tem que bater com `--arm` (16 = both, 8 = right/left);
   * `--task` precisa ser a string EXATA do dataset de treino — policies com VLM
     (SmolVLA, pi0) tokenizam esse texto e condicionam nele; o ACT ignora;
   * deps extras (SmolVLA precisa de `transformers` e `num2words` no venv, e baixa
@@ -74,6 +79,7 @@ import numpy as np
 import rclpy
 from builtin_interfaces.msg import Duration
 from message_filters import ApproximateTimeSynchronizer, Subscriber
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CompressedImage, Image, JointState
@@ -155,7 +161,16 @@ class PolicyRunner(Node):
         super().__init__("policy_runner")
         self.args = args
         self.slots = build_slots()
-        self.n_dims = len(self.slots)
+        # Slots que a POLICY controla. Num checkpoint unimanual (ex.: 8 dims, só o
+        # braço direito) a ação/estado têm 8 posições, não 16 — `pidx` traduz
+        # junta ROS -> índice no vetor da policy. O braço fora de `--arm` nem
+        # recebe comando (não é "segurado", simplesmente não é publicado).
+        self.arm = args.arm
+        self.active_slots = [s for s in self.slots if self.arm == "both" or s.side == self.arm]
+        self.active_sides = [side for side in ("left", "right")
+                             if any(s.side == side for s in self.active_slots)]
+        self.n_dims = len(self.active_slots)
+        self.pidx = {s.ros_joint: i for i, s in enumerate(self.active_slots)}
         self.device = args.device
 
         self.get_logger().info(f"carregando {args.checkpoint} em {self.device}...")
@@ -166,6 +181,8 @@ class PolicyRunner(Node):
         self._predict = predict_action
 
         self._setup_rename_map()
+        self._check_action_dims()
+        self._setup_cameras()
         self._setup_action_horizon()
         self._setup_temporal_ensembling()
         self._warmup()
@@ -197,16 +214,19 @@ class PolicyRunner(Node):
 
         # ---- observação: MESMO sync do episode_recorder ------------------
         img_type = CompressedImage if args.cameras_compressed else Image
-        subs = [Subscriber(self, JointState, "/joint_states"),
-                Subscriber(self, img_type, args.cam_chest_topic),
-                Subscriber(self, img_type, args.left_wrist_topic),
-                Subscriber(self, img_type, args.right_wrist_topic)]
+        # Só as câmeras que a policy consome: o synchronizer só dispara quando
+        # TODOS os tópicos assinados têm mensagem, então assinar uma câmera inútil
+        # (ex.: pulso esquerdo numa policy do braço direito) faz o laço inteiro
+        # parar se ela cair.
+        subs = [Subscriber(self, JointState, "/joint_states")]
+        subs += [Subscriber(self, img_type, topic) for _, topic in self.cams]
         self.sync = ApproximateTimeSynchronizer(subs, queue_size=30, slop=args.sync_slop)
         self.sync.registerCallback(self._on_obs)
 
         self.get_logger().info(
             f"pronto | {'DRY-RUN (não publica)' if args.dry_run else 'AO VIVO'} | "
             f"{'ARMADO' if self.armed else 'DESARMADO — publique True em /policy_runner/enable'} | "
+            f"arm={self.arm} ({self.n_dims} dims) | cameras={[k.split('.')[-1] for k, _ in self.cams]} | "
             f"max_step={args.max_step} rad/tick | freeze_left={args.freeze_left}")
 
     # ------------------------------------------------------------------
@@ -229,6 +249,36 @@ class PolicyRunner(Node):
                 break
         imagens = sorted(set(self.policy.config.input_features) - {"observation.state"})
         self.get_logger().info(f"policy '{self.policy.config.type}' espera as imagens: {imagens}")
+
+    def _check_action_dims(self) -> None:
+        """Falha ALTO na partida se a ação da policy não bate com `--arm`.
+
+        Antes isto só aparecia como "tick ignorado" repetido a 30 Hz. O tamanho do
+        STATE em config.json não serve de checagem: checkpoints do crislmfroes e do
+        gdorneles declaram state [6] (metadado morto), mas a ação [8]/[16] é real.
+        """
+        feat = self.policy.config.output_features.get("action")
+        n_pol = feat.shape[0] if feat is not None else None
+        if n_pol != self.n_dims:
+            arm_sugerido = {16: "both", 8: "right (ou left)"}.get(n_pol, "?")
+            sys.exit(f"a policy produz {n_pol} dims de ação, mas --arm={self.arm} usa "
+                     f"{self.n_dims}. Use --arm {arm_sugerido}.")
+
+    def _setup_cameras(self) -> None:
+        """Descobre quais das 3 câmeras do robô a policy realmente consome.
+
+        Vale a chave de ORIGEM (cam_chest...) ou o destino do rename (camera1...)
+        estar em input_features. A mesma lista alimenta assinatura, warmup e
+        inferência, então não tem como o warmup rodar com um conjunto de imagens
+        diferente do real.
+        """
+        todas = [("observation.images.cam_chest", self.args.cam_chest_topic),
+                 ("observation.images.left_cam_wrist", self.args.left_wrist_topic),
+                 ("observation.images.right_cam_wrist", self.args.right_wrist_topic)]
+        esperadas = set(self.policy.config.input_features)
+        self.cams = [(k, t) for k, t in todas if self.rename_map.get(k, k) in esperadas]
+        if not self.cams:
+            sys.exit(f"nenhuma câmera do robô bate com as imagens da policy: {sorted(esperadas)}")
 
     def _setup_action_horizon(self) -> None:
         """Horizonte recuante: quantas ações do chunk executar antes de re-planejar.
@@ -274,12 +324,8 @@ class PolicyRunner(Node):
         seguintes. Sem isto, essa trava cairia bem no instante em que você arma.
         """
         obs = {"observation.state": np.zeros(self.n_dims, dtype=np.float32)}
-        origem = {v: k for k, v in self.rename_map.items()}
-        for key in self.policy.config.input_features:
-            if "image" in key:
-                # alimenta pelo nome de ORIGEM, que é o que o preprocessor espera
-                obs[origem.get(key, key)] = np.zeros(
-                    (self.args.image_height, self.args.image_width, 3), dtype=np.uint8)
+        for key, _ in self.cams:   # nomes de ORIGEM, que é o que o preprocessor espera
+            obs[key] = np.zeros((self.args.image_height, self.args.image_width, 3), dtype=np.uint8)
         t0 = time.time()
         self._predict(obs, self.policy, self.torch.device(self.device), self.pre, self.post,
                       use_amp=False, task=self.args.task, robot_type=self.args.robot_type)
@@ -303,24 +349,19 @@ class PolicyRunner(Node):
     def _state_vector(self, js: JointState) -> np.ndarray:
         idx = {n: i for i, n in enumerate(js.name)}
         out = np.zeros(self.n_dims, dtype=np.float32)
-        for s in self.slots:
+        for i, s in enumerate(self.active_slots):
             if s.ros_joint in idx:
-                out[s.index] = js.position[idx[s.ros_joint]]
+                out[i] = js.position[idx[s.ros_joint]]
         return out
 
-    def _on_obs(self, js, chest, lw, rw) -> None:
+    def _on_obs(self, js, *imgs) -> None:
         self.js = {n: p for n, p in zip(js.name, js.position)}
         self.last_obs_t = time.time()
         state = self._state_vector(js)
 
         obs = {"observation.state": state}
-        feed = {"observation.images.cam_chest": chest,
-                "observation.images.left_cam_wrist": lw,
-                "observation.images.right_cam_wrist": rw}
-        for key, msg in feed.items():
-            # aceita a chave se ela (ou o nome pra onde o rename a leva) é esperada
-            if self.rename_map.get(key, key) in self.policy.config.input_features:
-                obs[key] = to_dataset_frame(msg, self.args.image_height, self.args.image_width)
+        for (key, _), msg in zip(self.cams, imgs):
+            obs[key] = to_dataset_frame(msg, self.args.image_height, self.args.image_width)
 
         action = self._predict(
             obs, self.policy, self.torch.device(self.device), self.pre, self.post,
@@ -344,20 +385,20 @@ class PolicyRunner(Node):
         separados porque o diagnóstico depende de saber QUAL limite agiu.
         """
         base = self.last_cmd if self.last_cmd is not None else {
-            s.ros_joint: float(state[s.index]) for s in self.slots}
+            s.ros_joint: float(state[i]) for i, s in enumerate(self.active_slots)}
         out: dict[str, float] = {}
         por_urdf: list[str] = []
         por_rate: list[str] = []
-        for s in self.slots:
+        for i, s in enumerate(self.active_slots):
             if self.args.freeze_left and s.side == "left":
-                out[s.ros_joint] = base.get(s.ros_joint, float(state[s.index]))
+                out[s.ros_joint] = base.get(s.ros_joint, float(state[i]))
                 continue
-            cru = float(act[s.index])
+            cru = float(act[i])
             lo, hi = URDF_LIMITS_RAD.get(s.ros_joint, (-np.inf, np.inf))
             tgt = min(max(cru, lo), hi)                        # 1) limite do URDF
             if tgt != cru:
                 por_urdf.append(s.ros_joint)
-            prev = base.get(s.ros_joint, float(state[s.index]))
+            prev = base.get(s.ros_joint, float(state[i]))
             step = self.args.gripper_max_step if s.is_gripper else self.args.max_step
             limitado = prev + float(np.clip(tgt - prev, -step, step))   # 2) rate limit
             if abs(limitado - tgt) > 1e-9:
@@ -415,9 +456,11 @@ class PolicyRunner(Node):
             return
         partes = []
         for lado, rotulo in (("right", "dir"), ("left", "esq")):
-            juntas = [s for s in self.slots if s.side == lado]
-            pior = max(juntas, key=lambda s: abs(act[s.index] - state[s.index]))
-            delta = float(act[pior.index] - state[pior.index])
+            juntas = [s for s in self.active_slots if s.side == lado]
+            if not juntas:
+                continue   # braço fora de --arm
+            pior = max(juntas, key=lambda s: abs(act[self.pidx[s.ros_joint]] - state[self.pidx[s.ros_joint]]))
+            delta = float(act[self.pidx[pior.ros_joint]] - state[self.pidx[pior.ros_joint]])
             partes.append(f"{rotulo} {pior.ros_joint} {delta:+.4f}")
         msg = (f"[{'seco' if self.args.dry_run else 'desarmado'}] ação #{self.n_actions} "
                f"| maior delta CRU: {' | '.join(partes)} rad "
@@ -442,10 +485,12 @@ class PolicyRunner(Node):
         # condição — o cálculo é o mesmo dos dois lados.
         partes = []
         for lado, rotulo in (("right", "dir"), ("left", "esq")):
-            bracos = [s for s in self.slots if s.side == lado and not s.is_gripper]
-            pedido = max(abs(act[s.index] - self.last_cmd[s.ros_joint]) for s in bracos)
+            bracos = [s for s in self.active_slots if s.side == lado and not s.is_gripper]
+            if not bracos:
+                continue   # braço fora de --arm
+            pedido = max(abs(act[self.pidx[s.ros_joint]] - self.last_cmd[s.ros_joint]) for s in bracos)
             aplicado = max(abs(target[s.ros_joint] - self.last_cmd[s.ros_joint]) for s in bracos)
-            garra = next(s for s in self.slots if s.side == lado and s.is_gripper)
+            garra = next(s for s in self.active_slots if s.side == lado and s.is_gripper)
             partes.append(f"{rotulo} pediu {pedido:.4f} aplicou {aplicado:.4f} | garra {rotulo} {target[garra.ros_joint]:.3f}")
         msg = f"#{self.n_actions} {hz:4.1f}Hz | " + " || ".join(partes)
         if por_rate:
@@ -458,13 +503,13 @@ class PolicyRunner(Node):
     # saída
     # ------------------------------------------------------------------
     def publish(self, target: dict[str, float]) -> None:
-        for side in ("left", "right"):
-            braco = [s for s in self.slots if s.side == side and not s.is_gripper]
+        for side in self.active_sides:   # o braço fora de --arm não recebe nada
+            braco = [s for s in self.active_slots if s.side == side and not s.is_gripper]
             m = Float64MultiArray()
             m.data = [float(target[s.ros_joint]) for s in braco]
             self.arm_pub[side].publish(m)
 
-            garra = [s for s in self.slots if s.side == side and s.is_gripper]
+            garra = [s for s in self.active_slots if s.side == side and s.is_gripper]
             t = JointTrajectory()
             t.header.stamp = self.get_clock().now().to_msg()
             t.joint_names = [s.ros_joint for s in garra]
@@ -484,7 +529,7 @@ class PolicyRunner(Node):
         """
         if self.js is None:
             return False
-        target = {s.ros_joint: float(self.js.get(s.ros_joint, 0.0)) for s in self.slots}
+        target = {s.ros_joint: float(self.js.get(s.ros_joint, 0.0)) for s in self.active_slots}
         try:
             self.publish(target)
         except Exception as exc:
@@ -524,6 +569,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--dry-run", action="store_true",
                     help="roda a policy mas não publica nos controllers")
     ap.add_argument("--auto-arm", action="store_true", help="já começa armado (cuidado)")
+
+    ap.add_argument("--arm", choices=("both", "right", "left"), default="both",
+                    help="qual(is) braço(s) a policy controla. both = 16 dims; right/left = "
+                         "8 dims (checkpoint unimanual). O outro braço não recebe comando "
+                         "nenhum e as câmeras que a policy não usa nem são assinadas.")
 
     seg = ap.add_argument_group("segurança")
     # Defaults calibrados contra o dataset (|action[t]-action[t-1]|, braço direito):
@@ -584,8 +634,8 @@ def main(argv=None):
     node.create_timer(0.1, node.watchdog)
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        node.get_logger().warn("Ctrl-C — desarmando")
+    except (KeyboardInterrupt, ExternalShutdownException):   # SIGINT ou SIGTERM
+        node.get_logger().warn("encerrando (sinal) — desarmando")
         node.armed = False
         node.hold()
     finally:
