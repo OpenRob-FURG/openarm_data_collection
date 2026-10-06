@@ -1,12 +1,15 @@
 """Sobe o pipeline de coleta de dataset: 3 câmeras + gravador + home_mover.
 
+Cada câmera é RealSense ou webcam (bloco `cameras:` do yaml); as dos pulsos publicam
+sempre em /{left,right}_wrist/image_raw, qualquer que seja o driver.
+
     ros2 launch openarm_data_collection data_collection.launch.py
 
-Devices/portas de câmera (chest_camera, wrist_driver, chest_serial,
-chest_device, left/right_wrist_device) vêm do bloco `cameras:` em
-config/recording_params.yaml — é ali que se edita quando uma porta USB muda,
-sem precisar tocar neste arquivo. Os args abaixo (CLI) sobrescrevem o yaml pra
-uma sessão específica.
+Drivers, seriais e devices de câmera (chest_camera, left/right_wrist_camera,
+wrist_driver, chest_serial, left/right_wrist_serial, chest_device,
+left/right_wrist_device) vêm do bloco `cameras:` em config/recording_params.yaml —
+é ali que se edita quando uma porta USB muda, sem precisar tocar neste arquivo. Os
+args abaixo (CLI) sobrescrevem o yaml pra uma sessão específica.
 
 Args úteis:
     arm:=both|left|right    qual braço gravar/teleoperar (padrão both = bimanual,
@@ -18,9 +21,13 @@ Args úteis:
     task_name:="..."        sobrescreve a tarefa gravada
     dataset_root:=/path      onde gravar o dataset LeRobot
     repo_id:=org/nome        repo_id do dataset
-    chest_serial:=XXHEX      serial da RealSense do peito (se houver mais de uma)
-    left_wrist_device:=/dev/videoN   webcam do pulso esquerdo
-    right_wrist_device:=/dev/videoN  webcam do pulso direito
+    chest_serial:=XXHEX      serial da RealSense do peito (obrigatório se houver mais
+                             de uma RealSense no launch; `rs-enumerate-devices -s`)
+    left_wrist_camera:=realsense|v4l2   driver do pulso esquerdo (idem right_wrist_camera)
+    left_wrist_serial:=XXHEX  serial da RealSense (D405) do pulso esquerdo
+    right_wrist_serial:=XXHEX serial da RealSense (D405) do pulso direito
+    left_wrist_device:=/dev/videoN   webcam do pulso esquerdo (quando v4l2)
+    right_wrist_device:=/dev/videoN  webcam do pulso direito (quando v4l2)
     python:=/path/to/python  interpretador do gravador (precisa de rclpy + lerobot)
     home_mover:=false        não sobe o home_mover
     teleop:=false            não sobe o bimanual_teleop
@@ -35,11 +42,19 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, GroupAction, OpaqueFunction, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from openarm_data_collection.camera_config import (
+    DRIVERS,
+    REALSENSE,
+    WRIST_TOPIC,
+    check_driver,
+    check_realsense_serials,
+    realsense_serial,
+)
 from openarm_data_collection.joint_layout import ARMS, camera_names_for_arm, check_arm
 
 _PKG = "openarm_data_collection"
@@ -100,20 +115,51 @@ def _setup(context, *_a, **_kw):
 
     run_cameras = cfg("cameras").lower() in ("true", "1", "yes")
 
-    if cfg("chest_camera") == "realsense":
+    def realsense(name, serial, extra=None, remappings=None):
         # IMU desligada de propósito: o driver hid-sensor do kernel prende o
         # gyro/accel e o librealsense não abre ("Permission denied" / "busy").
-        chest_node = Node(
+        # `rgb_camera.color_profile` vale pras D4xx com sensor RGB; a D405 não tem
+        # (a cor sai do módulo de profundidade -> `depth_module.color_profile`, que
+        # o chamador passa em `extra`). O driver só declara a chave que existe no
+        # aparelho e ignora a outra.
+        return Node(
             package="realsense2_camera", executable="realsense2_camera_node",
-            name="cam_chest", namespace="/", output="screen",
+            name=name, namespace="/", output="screen",
             parameters=[{
-                "serial_no": cfg("chest_serial"),
+                "serial_no": serial,
                 "enable_color": True, "enable_depth": False,
                 "enable_infra1": False, "enable_infra2": False,
                 "enable_gyro": False, "enable_accel": False,
                 "rgb_camera.color_profile": "640x480x30",
+                **(extra or {}),
             }],
+            remappings=remappings or [],
         )
+
+    chest_driver = check_driver(cfg("chest_camera"), "chest_camera")
+    wrist_camera = {
+        "left": check_driver(cfg("left_wrist_camera"), "left_wrist_camera"),
+        "right": check_driver(cfg("right_wrist_camera"), "right_wrist_camera"),
+    }
+    serial = {
+        "chest": realsense_serial(cfg("chest_serial")),
+        "left": realsense_serial(cfg("left_wrist_serial")),
+        "right": realsense_serial(cfg("right_wrist_serial")),
+    }
+
+    # RealSense que ESTE launch vai abrir (pulso ocioso não conta). Com mais de uma
+    # no barramento serial vazio deixaria o peito pegar uma D405 de pulso.
+    if run_cameras:
+        in_use = {}
+        if chest_driver == REALSENSE:
+            in_use["chest_serial"] = serial["chest"]
+        for side in ("left", "right"):
+            if f"{side}_cam_wrist" in cams_needed and wrist_camera[side] == REALSENSE:
+                in_use[f"{side}_wrist_serial"] = serial[side]
+        check_realsense_serials(in_use)
+
+    if chest_driver == REALSENSE:
+        chest_node = realsense("cam_chest", serial["chest"])
         chest_topic = "/cam_chest/color/image_raw"
     else:
         chest_node = v4l2("cam_chest", cfg("chest_device"), "chest_cam")
@@ -122,16 +168,35 @@ def _setup(context, *_a, **_kw):
     if run_cameras:
         # casa os tópicos do recorder com os drivers que este launch sobe
         recorder_overrides.setdefault("cam_chest_topic", chest_topic)
-        recorder_overrides.setdefault("left_wrist_topic", "/left_wrist/image_raw")
-        recorder_overrides.setdefault("right_wrist_topic", "/right_wrist/image_raw")
+        recorder_overrides.setdefault("left_wrist_topic", WRIST_TOPIC.format(side="left"))
+        recorder_overrides.setdefault("right_wrist_topic", WRIST_TOPIC.format(side="right"))
 
-    # Só sobe o driver do pulso que o dataset vai usar: no `arm=right` a webcam
-    # esquerda nem é aberta (uma USB a menos competindo no hub das C270).
+    def wrist_node(side):
+        """(nó do driver, é RealSense?)"""
+        if wrist_camera[side] == REALSENSE:
+            ns = f"{side}_wrist"
+            # A RealSense publica em /<nome>/color/image_raw; remapeia pro tópico da
+            # webcam, que é o que recorder e runner assinam. Assim o driver do pulso
+            # é só configuração: nada mais precisa saber qual é.
+            return realsense(
+                ns, serial[side], extra={"depth_module.color_profile": "640x480x30"},
+                remappings=[(f"/{ns}/color/image_raw", WRIST_TOPIC.format(side=side))]), True
+        return v4l2(f"{side}_wrist", cfg(f"{side}_wrist_device"), f"{side}_wrist_cam"), False
+
+    # Só sobe o driver do pulso que o dataset vai usar: no `arm=right` a câmera
+    # esquerda nem é aberta (uma USB a menos competindo no barramento).
+    # Várias RealSense subindo juntas disputam a enumeração do librealsense
+    # ("device busy" / não acha a câmera); escalona a abertura de cada uma.
     camera_actions = [chest_node]
-    if "left_cam_wrist" in cams_needed:
-        camera_actions.append(v4l2("left_wrist", cfg("left_wrist_device"), "left_wrist_cam"))
-    if "right_cam_wrist" in cams_needed:
-        camera_actions.append(v4l2("right_wrist", cfg("right_wrist_device"), "right_wrist_cam"))
+    n_realsense = 1 if chest_driver == REALSENSE else 0
+    for side in ("left", "right"):
+        if f"{side}_cam_wrist" not in cams_needed:
+            continue
+        node, is_realsense = wrist_node(side)
+        if is_realsense and n_realsense:
+            node = TimerAction(period=3.0 * n_realsense, actions=[node])
+        n_realsense += is_realsense
+        camera_actions.append(node)
     camera_group = GroupAction(
         condition=IfCondition(LaunchConfiguration("cameras")),
         actions=camera_actions,
@@ -222,8 +287,18 @@ def generate_launch_description():
         DeclareLaunchArgument("wrist_driver",
                               default_value=str(cams.get("wrist_driver", "usb_cam")),
                               choices=["v4l2", "usb_cam"]),
+        DeclareLaunchArgument("left_wrist_camera",
+                              default_value=str(cams.get("left_wrist_camera", "v4l2")),
+                              choices=list(DRIVERS)),
+        DeclareLaunchArgument("right_wrist_camera",
+                              default_value=str(cams.get("right_wrist_camera", "v4l2")),
+                              choices=list(DRIVERS)),
         DeclareLaunchArgument("chest_serial",
                               default_value=str(cams.get("chest_serial", ""))),
+        DeclareLaunchArgument("left_wrist_serial",
+                              default_value=str(cams.get("left_wrist_serial", ""))),
+        DeclareLaunchArgument("right_wrist_serial",
+                              default_value=str(cams.get("right_wrist_serial", ""))),
         DeclareLaunchArgument("chest_device",
                               default_value=str(cams.get("chest_device", ""))),
         DeclareLaunchArgument("left_wrist_device",

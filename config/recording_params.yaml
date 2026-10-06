@@ -14,6 +14,10 @@
 cameras:
   ros__parameters:
     chest_camera: realsense        # realsense | v4l2
+    # Pulsos: realsense (D405) | v4l2 (webcam, usa wrist_driver + *_wrist_device).
+    # Qualquer que seja o driver o tópico é o mesmo (/{left,right}_wrist/image_raw).
+    left_wrist_camera: v4l2
+    right_wrist_camera: realsense
     # v4l2 (YUYV) medido em ~3-4ms de atraso (camera->topico); usb_cam (MJPG)
     # tem um bug de buffering interno que prende ~440-820ms de atraso fixo
     # por camera (confirmado isolando com V4L2 puro, sem ROS: o kernel/USB
@@ -22,7 +26,12 @@ cameras:
     # teste de 12s (~28Hz cada) -- mas isso foi com cena estatica; observar
     # tearing durante movimento real antes de confiar 100%.
     wrist_driver: v4l2             # v4l2 (YUYV, recomendado) | usb_cam (MJPG, ~500-800ms de atraso -- bug conhecido)
-    chest_serial: ""                # vazio = aceita a RealSense que tiver conectada
+    # Seriais das RealSense (`rs-enumerate-devices -s`). Com UMA RealSense no launch
+    # pode ficar vazio; com duas ou mais é OBRIGATÓRIO em todas — o launch aborta
+    # em vez de deixar o peito abrir uma D405 de pulso.
+    chest_serial: ""
+    left_wrist_serial: ""
+    right_wrist_serial: ""
     chest_device: "/dev/video12"
     left_wrist_device: "/dev/video4"
     right_wrist_device: "/dev/video6"

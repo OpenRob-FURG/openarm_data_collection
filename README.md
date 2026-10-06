@@ -92,8 +92,8 @@ ros2 launch openarm_data_collection data_collection.launch.py \
     dataset_root:=/home/popzap-lab/datasets/openarm_bimanual_vr
 ```
 
-Sobe RealSense D435i (peito) + 2× `v4l2_camera` (pulsos) + `episode_recorder` +
-`home_mover`. Verificado com hardware real (2026-09-09): 3 câmeras a ~30 fps,
+Sobe RealSense D435i (peito) + 2 câmeras de pulso (webcam `v4l2_camera` ou RealSense
+D405, por pulso) + `episode_recorder` + `home_mover`. Verificado com hardware real (2026-09-09): 3 câmeras a ~30 fps,
 episódio gravado e validado.
 
 **Devices de câmera ficam em `config/recording_params.yaml` (bloco `cameras:`)**,
@@ -102,8 +102,12 @@ não no launch — é ali que se edita quando uma porta USB muda:
 ```yaml
 cameras:
   chest_camera: realsense        # realsense | v4l2
-  wrist_driver: usb_cam          # usb_cam (MJPG) | v4l2 (YUYV)
-  chest_serial: ""                # vazio = aceita a RealSense conectada
+  left_wrist_camera: v4l2        # realsense (D405) | v4l2 (webcam)
+  right_wrist_camera: realsense
+  wrist_driver: usb_cam          # driver das webcams: usb_cam (MJPG) | v4l2 (YUYV)
+  chest_serial: ""               # serial das RealSense: obrigatório se houver 2+ no launch
+  left_wrist_serial: ""
+  right_wrist_serial: ""
   left_wrist_device: "/dev/v4l/by-path/...-usb-0:4:1.0-video-index0"
   right_wrist_device: "/dev/v4l/by-path/...-usb-0:10.4:1.0-video-index0"
 ```
@@ -120,9 +124,20 @@ antes de decidir qual porta é esquerda/direita.
 
 - As C270 têm serial de fábrica igual → **`by-id` colide, use `by-path`** (já é o default).
   O launch resolve o symlink pra `/dev/videoN` (o `usb_cam` não segue symlink).
-- **RealSense sem serial fixo** por padrão — o serial já mudou entre sessões
-  (outra unidade, ou o cabo reconectando diferente). Só fixe `chest_serial` se
-  tiver mais de uma RealSense no barramento.
+- **RealSense nos pulsos (D405)**: `right_wrist_camera: realsense` (e/ou `left_`).
+  Qualquer que seja o driver, a imagem do pulso sai em `/{left,right}_wrist/image_raw`
+  (a RealSense é remapeada pra isso) — recorder, runner e datasets não mudam.
+  Cada câmera é mista à vontade (um pulso D405, o outro webcam).
+- **Seriais**: com **uma** RealSense no launch o serial pode ficar vazio. Com **duas ou
+  mais** (peito + D405) ele é obrigatório em todas — senão o peito pode abrir a D405 do
+  pulso — e o launch aborta com a lista do que falta. Descubra com
+  `rs-enumerate-devices -s` (um aparelho por vez conectado ajuda a saber quem é quem) e
+  ponha no yaml (`chest_serial`, `right_wrist_serial`...) ou `right_wrist_serial:=XXXX`.
+  O launch já acrescenta o `_` que o driver espera na frente do serial. As RealSense
+  sobem escalonadas (3 s entre uma e outra) pra não disputar a enumeração do USB.
+  A D405 usa `depth_module.color_profile` (não tem sensor RGB separado); IMU desligada.
+- **Serial do peito**: o serial já mudou entre sessões (outra unidade, cabo reconectando
+  diferente) — se trocar a câmera do peito, atualize `chest_serial`.
 - **IMU da RealSense desligada** no launch: o driver `hid-sensor` do kernel prende
   o gyro/accel (`Permission denied` / `Hid device is busy`). Não precisamos dela.
 - **Webcams via `usb_cam` + MJPG** (`wrist_driver:=usb_cam`, default). Verificado:
@@ -147,7 +162,7 @@ automaticamente. Após o **B** há uma pausa de alguns segundos enquanto os
 `arm:=both|left|right` (ver acima), `cameras:=false` (usar seus próprios
 drivers), `home_mover:=false`,
 `repo_id:=org/nome`, `python:=/caminho`. `chest_camera:=`, `wrist_driver:=`,
-`chest_serial:=`, `*_wrist_device:=` sobrescrevem por sessão o que já vem do
+`{left,right}_wrist_camera:=`, `chest_serial:=`, `*_wrist_serial:=`, `*_wrist_device:=` sobrescrevem por sessão o que já vem do
 `cameras:` do yaml — normalmente não precisa passar nenhum deles.
 
 Parâmetros finos (tópicos, nomes de junta, `arm_angle_scale`,
@@ -200,6 +215,7 @@ Ainda não implementado.
 | Arquivo | Papel |
 |---|---|
 | `episode_recorder.py` | nó principal: sincroniza `/joint_states` + 3 câmeras, monta state/action, grava via LeRobot |
+| `camera_config.py` | regras de câmera do launch (serial `_XXXX` do driver RealSense, guarda contra 2+ RealSense sem serial) |
 | `joint_layout.py` | layout canônico do vetor (`build_slots(arm=)`: 16 dims `both` ou 8 `left/right`, reindexado de 0) + câmeras por braço + limites do URDF. Fonte única: recorder, validate, replay, runner |
 | `lerobot_writer.py` | wrapper de `LeRobotDataset` (create/resume/add_frame/save/discard/finalize), offline. Recusa retomar dataset de schema diferente |
 | `image_utils.py` | `sensor_msgs` → numpy RGB uint8 sem `cv_bridge` |
