@@ -9,6 +9,11 @@ sem precisar tocar neste arquivo. Os args abaixo (CLI) sobrescrevem o yaml pra
 uma sessão específica.
 
 Args úteis:
+    arm:=both|left|right    qual braço gravar/teleoperar (padrão both = bimanual,
+                            16 dims, 3 câmeras). right/left = 8 dims, só o peito + o
+                            pulso daquele braço: o driver do outro pulso nem sobe, o
+                            dataset vai pra ~/datasets/openarm_{right,left}_arm_vr e
+                            o home_mover continua parqueando os DOIS braços no start.
     cameras:=false          não sobe os drivers de câmera (use os seus)
     task_name:="..."        sobrescreve a tarefa gravada
     dataset_root:=/path      onde gravar o dataset LeRobot
@@ -35,6 +40,8 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from openarm_data_collection.joint_layout import ARMS, camera_names_for_arm, check_arm
+
 _PKG = "openarm_data_collection"
 
 
@@ -45,9 +52,13 @@ def _setup(context, *_a, **_kw):
     def cfg(name):
         return LaunchConfiguration(name).perform(context)
 
+    arm = check_arm(cfg("arm"))
+    cams_needed = camera_names_for_arm(arm)   # cam_chest + pulso(s) do braço
+
     recorder_overrides = {
         key: cfg(key) for key in ("task_name", "dataset_root", "repo_id") if cfg(key)
     }
+    recorder_overrides["arm"] = arm
 
     wrist_driver = cfg("wrist_driver")
 
@@ -114,13 +125,16 @@ def _setup(context, *_a, **_kw):
         recorder_overrides.setdefault("left_wrist_topic", "/left_wrist/image_raw")
         recorder_overrides.setdefault("right_wrist_topic", "/right_wrist/image_raw")
 
+    # Só sobe o driver do pulso que o dataset vai usar: no `arm=right` a webcam
+    # esquerda nem é aberta (uma USB a menos competindo no hub das C270).
+    camera_actions = [chest_node]
+    if "left_cam_wrist" in cams_needed:
+        camera_actions.append(v4l2("left_wrist", cfg("left_wrist_device"), "left_wrist_cam"))
+    if "right_cam_wrist" in cams_needed:
+        camera_actions.append(v4l2("right_wrist", cfg("right_wrist_device"), "right_wrist_cam"))
     camera_group = GroupAction(
         condition=IfCondition(LaunchConfiguration("cameras")),
-        actions=[
-            chest_node,
-            v4l2("left_wrist", cfg("left_wrist_device"), "left_wrist_cam"),
-            v4l2("right_wrist", cfg("right_wrist_device"), "right_wrist_cam"),
-        ],
+        actions=camera_actions,
     )
 
     recorder = Node(
@@ -131,7 +145,7 @@ def _setup(context, *_a, **_kw):
 
     home_mover = Node(
         package=_PKG, executable="home_mover", name="home_mover",
-        output="screen", parameters=[params],
+        output="screen", parameters=[params, {"arm": arm}],
         condition=IfCondition(LaunchConfiguration("home_mover")),
     )
 
@@ -139,7 +153,7 @@ def _setup(context, *_a, **_kw):
     # .venv312 (lerobot). Os dois no mesmo pacote, interpretadores diferentes.
     teleop = Node(
         package=_PKG, executable="bimanual_teleop", name="bimanual_teleop",
-        output="screen", emulate_tty=True,
+        output="screen", emulate_tty=True, parameters=[{"arm": arm}],
         condition=IfCondition(LaunchConfiguration("teleop")),
     )
 
@@ -196,6 +210,8 @@ def generate_launch_description():
         if not cams.get(key):
             cams[key] = dflt
     return LaunchDescription([
+        DeclareLaunchArgument("arm", default_value="both", choices=list(ARMS),
+                              description="both (bimanual, 16 dims) | left | right (8 dims)"),
         DeclareLaunchArgument("cameras", default_value="true"),
         DeclareLaunchArgument("task_name", default_value=""),
         DeclareLaunchArgument("dataset_root", default_value=""),

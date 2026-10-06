@@ -1,4 +1,12 @@
-"""home_mover — leva os dois braços para uma pose de home, suavemente.
+"""home_mover — leva os braços para uma pose de home, suavemente.
+
+Parâmetro `arm` (both | left | right, padrão both) diz qual braço o pipeline usa:
+
+  * home no STARTUP leva SEMPRE os dois: tira o braço ocioso da singularidade (o
+    bringup sobe em zero = reto) e deixa ele na mesma pose de repouso das gravações
+    bimanuais, que aparece no campo da câmera do peito;
+  * home pós-episódio / botão B / /data_collection/go_home leva só o braço ativo —
+    o outro não se mexe durante a coleta, então não há o que reposicionar.
 
 Dispara quando:
   * recebe std_msgs/Empty em /data_collection/go_home (publicado pelo
@@ -26,10 +34,13 @@ import math
 
 import rclpy
 from builtin_interfaces.msg import Duration
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Empty, Float64MultiArray
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+from openarm_data_collection.joint_layout import check_arm, sides_for_arm
 
 _DEF_LEFT = [f"openarm_left_joint{i}" for i in range(1, 8)]
 _DEF_RIGHT = [f"openarm_right_joint{i}" for i in range(1, 8)]
@@ -51,6 +62,8 @@ class HomeMover(Node):
         super().__init__("home_mover")
         p = self.declare_parameter
 
+        self.arm = check_arm(p("arm", "both").value)
+        self.active_sides = sides_for_arm(self.arm)
         self.left_joints = list(p("left_arm_joint_names", _DEF_LEFT).value)
         self.right_joints = list(p("right_arm_joint_names", _DEF_RIGHT).value)
         self.left_home = [float(x) for x in p("left_home_positions", [0.0] * 7).value]
@@ -94,12 +107,11 @@ class HomeMover(Node):
 
         # estado do streaming (só usado no modo forward_position)
         self._stream_timer = None
-        self._stream_left: list[list[float]] = []
-        self._stream_right: list[list[float]] = []
+        self._stream: dict[str, list[list[float]]] = {}
         self._stream_idx = 0
 
         self.get_logger().info(
-            f"home_mover pronto | modo={self.mode} | {self.move_duration}s, waypoint a cada "
+            f"home_mover pronto | arm={self.arm} | modo={self.mode} | {self.move_duration}s, waypoint a cada "
             f"{self.waypoint_dt*1000:.0f}ms | {left_topic} + {right_topic}"
             f" | gatilhos: /data_collection/go_home"
             f"{' + botão B (XR)' if self.respond_to_xr else ''}"
@@ -116,7 +128,7 @@ class HomeMover(Node):
             self._startup_timer = self.create_timer(3.0, self._startup_home)
             return
         self.get_logger().info("➡️  home automático no startup (tira o braço da singularidade)")
-        self.go_home()
+        self.go_home(todos=True)   # inclui o braço ocioso: ver docstring
 
     def _on_js(self, msg: JointState):
         self._pos.update(zip(msg.name, msg.position))
@@ -137,10 +149,12 @@ class HomeMover(Node):
         return [[_ease(a, b, k / n) for a, b in zip(start, home)]
                 for k in range(1, n + 1)]
 
-    def _check_subscribers(self) -> bool:
+    def _check_subscribers(self, sides) -> bool:
         """Avisa alto se ninguém escuta — sintoma clássico de 'o braço não mexe'."""
         ok = True
-        for side, pub in (("left", self.left_pub), ("right", self.right_pub)):
+        pubs = {"left": self.left_pub, "right": self.right_pub}
+        for side in sides:
+            pub = pubs[side]
             if pub.get_subscription_count() == 0:
                 self.get_logger().error(
                     f"ninguém inscrito em {self._topics[side]} — o controller do braço "
@@ -149,38 +163,49 @@ class HomeMover(Node):
                 ok = False
         return ok
 
-    def go_home(self):
-        lw = self._waypoints(self.left_joints, self.left_home)
-        rw = self._waypoints(self.right_joints, self.right_home)
-        if lw is None or rw is None:
-            return
-        self._check_subscribers()
+    def go_home(self, todos: bool = False):
+        """Leva pra home o braço ativo (`todos=True`: os dois, usado no startup)."""
+        sides = ("left", "right") if todos else self.active_sides
+        spec = {"left": (self.left_joints, self.left_home),
+                "right": (self.right_joints, self.right_home)}
+        wps = {}
+        for side in sides:
+            wp = self._waypoints(*spec[side])
+            if wp is None:
+                return
+            wps[side] = wp
+        self._check_subscribers(sides)
+        n = len(next(iter(wps.values())))
 
         if self.mode == "trajectory":
-            self.left_pub.publish(self._as_traj(self.left_joints, lw))
-            self.right_pub.publish(self._as_traj(self.right_joints, rw))
-            self.get_logger().info(f"➡️  indo para home suavemente ({len(lw)} waypoints)")
+            pubs = {"left": self.left_pub, "right": self.right_pub}
+            for side, wp in wps.items():
+                pubs[side].publish(self._as_traj(spec[side][0], wp))
+            self.get_logger().info(
+                f"➡️  indo para home suavemente ({n} waypoints) | braços: {list(sides)}")
             return
 
         # forward_position: rampa publicada waypoint a waypoint
         if self._stream_timer is not None:
             self._stream_timer.cancel()
             self._stream_timer = None
-        self._stream_left, self._stream_right = lw, rw
+        self._stream = wps
         self._stream_idx = 0
         self._stream_timer = self.create_timer(self.waypoint_dt, self._stream_step)
         self.get_logger().info(
-            f"➡️  indo para home suavemente ({len(lw)} waypoints em "
-            f"{self.move_duration:.1f}s, streaming)")
+            f"➡️  indo para home suavemente ({n} waypoints em "
+            f"{self.move_duration:.1f}s, streaming) | braços: {list(sides)}")
 
     def _stream_step(self):
-        if self._stream_idx >= len(self._stream_left):
+        n = len(next(iter(self._stream.values())))
+        if self._stream_idx >= n:
             self._stream_timer.cancel()
             self._stream_timer = None
             self.get_logger().info("✅ home concluído")
             return
-        self.left_pub.publish(Float64MultiArray(data=self._stream_left[self._stream_idx]))
-        self.right_pub.publish(Float64MultiArray(data=self._stream_right[self._stream_idx]))
+        pubs = {"left": self.left_pub, "right": self.right_pub}
+        for side, wp in self._stream.items():
+            pubs[side].publish(Float64MultiArray(data=wp[self._stream_idx]))
         self._stream_idx += 1
 
     def _as_traj(self, joints, waypoints) -> JointTrajectory:
@@ -203,7 +228,7 @@ def main(args=None):
     node = HomeMover()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):   # SIGINT ou SIGTERM
         pass
     finally:
         node.destroy_node()

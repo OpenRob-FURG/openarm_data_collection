@@ -4,6 +4,10 @@ Prova, SEM modelo, que a unidade (radiano), a ordem das juntas e a fiação dos
 controllers estão corretas: se o braço reproduz o movimento gravado, o pipeline
 de dados está consistente.
 
+Funciona com dataset de qualquer `arm` (both = 16 dims, left/right = 8): as colunas
+são mapeadas pelo NOME da feature, então só os controllers das juntas que existem
+no dataset recebem comando — o braço que ficou de fora não é tocado.
+
     # 1) checagem seca — não move nada, só compara os ranges com os limites do URDF
     ros2 run openarm_data_collection dataset_replay \\
         --root /home/popzap-lab/datasets/openarm_bimanual_vr --episode 0 --dry-run
@@ -29,6 +33,7 @@ from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from openarm_data_collection.joint_layout import URDF_LIMITS_RAD, build_slots
+from openarm_data_collection.validate_dataset import detect_arm
 
 
 def _load_actions(root: str, episode: int):
@@ -163,7 +168,9 @@ def main(argv=None):
     node = Replayer(args)
     per_joint = node.rows_to_ros(actions, names)
 
-    node.get_logger().info(f"episódio {args.episode}: {len(actions)} frames @ {fps} fps")
+    node.get_logger().info(
+        f"episódio {args.episode}: {len(actions)} frames @ {fps} fps | "
+        f"dataset arm={detect_arm(names)} ({len(names)} dims)")
     within = node.check_limits(per_joint)
 
     if args.dry_run:

@@ -30,6 +30,7 @@ _PKG = "openarm_data_collection"
 # args que viram flags de linha de comando do nó (nome do launch -> flag)
 _PASSTHROUGH = {
     "checkpoint": "--checkpoint",
+    "arm": "--arm",
     "device": "--device",
     "task": "--task",
     "max_step": "--max-step",
@@ -94,6 +95,8 @@ def generate_launch_description():
                               description="true = roda a policy mas não publica nos controllers"),
         DeclareLaunchArgument("auto_arm", default_value="false",
                               description="true = já começa armado (cuidado)"),
+        DeclareLaunchArgument("arm", default_value="both",
+                              description="both (16 dims) | right | left (checkpoint unimanual, 8 dims)"),
         DeclareLaunchArgument("freeze_left", default_value="false",
                               description="ignora as 8 dims do braço esquerdo — ligue só "
                                           "se a tarefa sabidamente não usa o braço esquerdo"),

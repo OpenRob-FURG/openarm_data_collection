@@ -53,8 +53,17 @@ xr_tf:
 episode_recorder:
   ros__parameters:
     task_name: ""
-    dataset_root: "~/datasets/openarm_bimanual_vr"
-    repo_id: "furg/openarm_bimanual_vr"
+    # `arm` NÃO fica aqui: vem do argumento `arm:=both|left|right` do launch, que
+    # repassa o mesmo valor ao recorder, ao teleop e ao home_mover (default both).
+    #
+    # `{arm_tag}` vira bimanual | left_arm | right_arm conforme o `arm`, então cada
+    # tipo de dataset tem o próprio diretório: both continua em
+    # ~/datasets/openarm_bimanual_vr (o de sempre) e `arm:=right` grava em
+    # ~/datasets/openarm_right_arm_vr, sem colidir com o bimanual. Um dataset_root
+    # explícito no CLI sem a marca vale como veio (e o writer recusa um dataset de
+    # schema diferente em vez de gravar por cima).
+    dataset_root: "~/datasets/openarm_{arm_tag}_vr"
+    repo_id: "furg/openarm_{arm_tag}_vr"
     fps: 30
 
     image_height: 480
@@ -103,6 +112,8 @@ episode_recorder:
 
 home_mover:
   ros__parameters:
+    # `arm` também vem do launch. Startup leva os DOIS braços pra home; depois de
+    # cada episódio só o braço ativo (ver home_mover.py).
     left_arm_joint_names:
       - openarm_left_joint1
       - openarm_left_joint2

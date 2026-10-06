@@ -1,13 +1,20 @@
-"""episode_recorder — grava episódios de teleop bimanual no formato LeRobot v3.
+"""episode_recorder — grava episódios de teleop no formato LeRobot v3.
 
-Fontes ROS:
-  * /joint_states  (sensor_msgs/JointState)  -> observation.state (16 dims)
+`arm` (both | left | right, padrão both) escolhe o que entra no dataset:
+
+  both   16 dims, 3 câmeras  — o bimanual de sempre (bi_openarm_follower)
+  right  8 dims, cam_chest + right_cam_wrist  (openarm_follower)
+  left   8 dims, cam_chest + left_cam_wrist   (openarm_follower)
+
+Fontes ROS (só as do braço escolhido):
+  * /joint_states  (sensor_msgs/JointState)  -> observation.state
   * braco: comando do forward_position_controller (std_msgs/Float64MultiArray)
-    garra: controller_state do gripper_controller (control_msgs)  -> action (16 dims)
-  * 3 câmeras (sensor_msgs/Image ou CompressedImage) -> observation.images.*
+    garra: controller_state do gripper_controller (control_msgs)  -> action
+  * câmeras (sensor_msgs/Image ou CompressedImage) -> observation.images.*
 
-Layout do vetor de 16 dims (igual ao bi_openarm_follower do OpenArm LeRobot):
-  [ left_joint_1..7, left_gripper, right_joint_1..7, right_gripper ]
+Layout do vetor (joint_layout.build_slots — fonte única, a mesma do runner):
+  both:  [ left_joint_1..7, left_gripper, right_joint_1..7, right_gripper ]
+  right: [ right_joint_1..7, right_gripper ]   (mesmos nomes, reindexado de 0)
 
 Controle por botão (TeleopXR / Meta Quest), via xr_buttons.XRButtonMonitor:
   A (tap)          -> START   começa um episódio
@@ -21,6 +28,7 @@ import os
 import numpy as np
 import rclpy
 from message_filters import ApproximateTimeSynchronizer, Subscriber
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from control_msgs.msg import JointTrajectoryControllerState
@@ -29,7 +37,10 @@ from std_msgs.msg import Empty, Float64MultiArray
 
 from openarm_data_collection.image_utils import to_dataset_frame
 from openarm_data_collection.lerobot_writer import LeRobotWriter
-from openarm_data_collection.joint_layout import build_slots, feature_names
+from openarm_data_collection.joint_layout import (
+    arm_tag, build_slots, camera_names_for_arm, check_arm, feature_names,
+    robot_type_for_arm, sides_for_arm,
+)
 from openarm_data_collection.xr_buttons import RecordingEvent, XRButtonMonitor
 
 
@@ -45,9 +56,17 @@ class EpisodeRecorder(Node):
         # caminho portatil ("~/datasets/...") em vez do home de uma maquina so,
         # que virava conflito toda vez que o repo ia pro outro PC. O expandvars
         # fica junto de graca, para apontar um disco externo via $VAR se precisar.
+        #
+        # `arm` (both|left|right) decide o schema do dataset: both = 16 dims e 3
+        # câmeras (o de sempre); left/right = 8 dims, peito + pulso daquele braço.
+        # `{arm_tag}` em dataset_root/repo_id vira bimanual|left_arm|right_arm, então
+        # cada tipo de dataset ganha o próprio diretório e `both` continua em
+        # ~/datasets/openarm_bimanual_vr. Um root explícito sem a marca vale como veio.
+        self.arm = check_arm(p("arm", "both").value)
+        tag = arm_tag(self.arm)
         self.dataset_root = os.path.expanduser(os.path.expandvars(
-            p("dataset_root", "~/datasets/openarm_bimanual_vr").value))
-        self.repo_id = p("repo_id", "furg/openarm_bimanual_vr").value
+            p("dataset_root", "~/datasets/openarm_{arm_tag}_vr").value)).replace("{arm_tag}", tag)
+        self.repo_id = p("repo_id", "furg/openarm_{arm_tag}_vr").value.replace("{arm_tag}", tag)
         self.fps = int(p("fps", 30).value)
 
         self.img_h = int(p("image_height", 480).value)
@@ -71,13 +90,19 @@ class EpisodeRecorder(Node):
             "left": p("left_gripper_joint_name", "openarm_left_finger_joint1").value,
             "right": p("right_gripper_joint_name", "openarm_right_finger_joint1").value,
         }
-        self.slots = build_slots(arm_joints, gripper_joint)
+        self.slots = build_slots(arm_joints, gripper_joint, arm=self.arm)
+        self.n_dims = len(self.slots)
+        sides = sides_for_arm(self.arm)
 
         # tópicos
         cam_chest = p("cam_chest_topic", "/cam_chest/color/image_raw").value
         cam_lw = p("left_wrist_topic", "/left_wrist/image_raw").value
         cam_rw = p("right_wrist_topic", "/right_wrist/image_raw").value
         cam_compressed = bool(p("cameras_compressed", False).value)
+        # nome da câmera no dataset -> tópico; só as de `camera_names_for_arm` entram
+        cam_topics = {"cam_chest": cam_chest, "left_cam_wrist": cam_lw,
+                      "right_cam_wrist": cam_rw}
+        self.cam_names = camera_names_for_arm(self.arm)
 
         # O teleop comanda o braço pelo forward_position_controller, que publica
         # Float64MultiArray (sem nomes de junta) — daí o par tópico/nomes abaixo.
@@ -98,21 +123,16 @@ class EpisodeRecorder(Node):
         # ---- dataset --------------------------------------------------
         names = feature_names(self.slots)
         features = {
-            "observation.state": {"dtype": "float32", "shape": (16,), "names": names},
-            "action": {"dtype": "float32", "shape": (16,), "names": names},
-            "observation.images.cam_chest": {
-                "dtype": "video", "shape": (self.img_h, self.img_w, 3),
-                "names": ["height", "width", "channels"]},
-            "observation.images.left_cam_wrist": {
-                "dtype": "video", "shape": (self.img_h, self.img_w, 3),
-                "names": ["height", "width", "channels"]},
-            "observation.images.right_cam_wrist": {
-                "dtype": "video", "shape": (self.img_h, self.img_w, 3),
-                "names": ["height", "width", "channels"]},
+            "observation.state": {"dtype": "float32", "shape": (self.n_dims,), "names": names},
+            "action": {"dtype": "float32", "shape": (self.n_dims,), "names": names},
         }
+        for cam in self.cam_names:
+            features[f"observation.images.{cam}"] = {
+                "dtype": "video", "shape": (self.img_h, self.img_w, 3),
+                "names": ["height", "width", "channels"]}
         self.writer = LeRobotWriter(
             repo_id=self.repo_id, root_dir=self.dataset_root,
-            fps=self.fps, features=features,
+            fps=self.fps, features=features, robot_type=robot_type_for_arm(self.arm),
         )
 
         # ---- estado interno -----------------------------------------
@@ -130,31 +150,32 @@ class EpisodeRecorder(Node):
         # coluna de ação do dataset ficava só com o que o home_mover mandava.
         # BEST_EFFORT aceita os dois (um pub RELIABLE serve sub BEST_EFFORT).
         cmd_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
-        for topic, joint_names in ((left_arm_cmd, arm_joints["left"]),
-                                   (right_arm_cmd, arm_joints["right"])):
+        arm_cmd = {"left": left_arm_cmd, "right": right_arm_cmd}
+        grip_cmd = {"left": left_grip_cmd, "right": right_grip_cmd}
+        for side in sides:   # o braço fora de --arm não entra no dataset
             self.create_subscription(
-                Float64MultiArray, topic,
-                lambda msg, n=joint_names: self._on_array_command(msg, n), cmd_qos)
-
-        for topic in (left_grip_cmd, right_grip_cmd):
+                Float64MultiArray, arm_cmd[side],
+                lambda msg, n=arm_joints[side]: self._on_array_command(msg, n), cmd_qos)
             self.create_subscription(
-                JointTrajectoryControllerState, topic, self._on_controller_state, 10)
+                JointTrajectoryControllerState, grip_cmd[side],
+                self._on_controller_state, 10)
 
         img_type = CompressedImage if cam_compressed else Image
-        sub_js = Subscriber(self, JointState, "/joint_states")
-        sub_chest = Subscriber(self, img_type, cam_chest)
-        sub_lw = Subscriber(self, img_type, cam_lw)
-        sub_rw = Subscriber(self, img_type, cam_rw)
+        # Só as câmeras do braço: o synchronizer só dispara quando TODOS os tópicos
+        # assinados têm mensagem, então assinar a câmera do pulso ocioso faria a
+        # gravação inteira parar se ela caísse (e as C270 caem — ver recording_params).
+        subs = [Subscriber(self, JointState, "/joint_states")]
+        subs += [Subscriber(self, img_type, cam_topics[c]) for c in self.cam_names]
         # slop de meio frame alinha /joint_states (>=50 Hz) com as câmeras a `fps`.
         self.sync = ApproximateTimeSynchronizer(
-            [sub_js, sub_chest, sub_lw, sub_rw],
-            queue_size=30, slop=self.sync_slop)
+            subs, queue_size=30, slop=self.sync_slop)
         self.sync.registerCallback(self._on_synced)
 
         self.buttons = XRButtonMonitor(self, self._on_button_event)
 
         self.get_logger().info(
-            f"episode_recorder pronto | tarefa='{self.task_name}' | "
+            f"episode_recorder pronto | arm={self.arm} ({self.n_dims} dims, "
+            f"câmeras={self.cam_names}) | tarefa='{self.task_name}' | "
             f"dataset={self.dataset_root} | episódios já gravados="
             f"{self.writer.episodes_saved}. A=start B=stop X(long)=discard.")
 
@@ -208,7 +229,7 @@ class EpisodeRecorder(Node):
 
     def _state_vector(self, js: JointState) -> np.ndarray:
         idx = {n: i for i, n in enumerate(js.name)}
-        out = np.zeros(16, dtype=np.float32)
+        out = np.zeros(self.n_dims, dtype=np.float32)
         for s in self.slots:
             if s.ros_joint in idx:
                 out[s.index] = self._scale(s, js.position[idx[s.ros_joint]])
@@ -221,7 +242,7 @@ class EpisodeRecorder(Node):
                 out[s.index] = self._scale(s, self._cmd[s.ros_joint])
         return out.astype(np.float32)
 
-    def _on_synced(self, js: JointState, chest, left_wrist, right_wrist):
+    def _on_synced(self, js: JointState, *imgs):
         if not self.is_recording:
             return
         try:
@@ -229,11 +250,10 @@ class EpisodeRecorder(Node):
             frame = {
                 "observation.state": state,
                 "action": self._action_vector(state),
-                "observation.images.cam_chest": to_dataset_frame(chest, self.img_h, self.img_w),
-                "observation.images.left_cam_wrist": to_dataset_frame(left_wrist, self.img_h, self.img_w),
-                "observation.images.right_cam_wrist": to_dataset_frame(right_wrist, self.img_h, self.img_w),
                 "task": self.task_name,
             }
+            for cam, msg in zip(self.cam_names, imgs):
+                frame[f"observation.images.{cam}"] = to_dataset_frame(msg, self.img_h, self.img_w)
             self.writer.add_frame(frame)
             self._frames_this_episode += 1
         except Exception as exc:  # nunca deixa o callback derrubar o nó no meio da coleta
@@ -251,7 +271,7 @@ def main(args=None):
     node = EpisodeRecorder()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):   # SIGINT ou SIGTERM
         pass
     finally:
         node.shutdown()
