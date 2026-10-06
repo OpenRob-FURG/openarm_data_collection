@@ -1,8 +1,10 @@
-"""Layout canônico do vetor de 16 dims — fonte única para recorder, replay e
-runner de policy.
+"""Layout canônico do vetor de estado/ação — fonte única para recorder, replay,
+validate e runner de policy.
 
-Ordem (igual ao bi_openarm_follower do OpenArm LeRobot):
+Ordem com `arm="both"` (16 dims, igual ao bi_openarm_follower do OpenArm LeRobot):
     [ left_joint_1..7, left_gripper, right_joint_1..7, right_gripper ]
+Com `arm="left"` ou `"right"`: só os 8 do respectivo braço, mesma ordem e mesmos
+nomes (`right_joint_1.pos` …), reindexados de 0 a 7.
 
 Cada entrada mapeia o nome da feature LeRobot (`<side>_<joint>.pos`) para o nome
 da junta no /joint_states e nos comandos dos controllers ROS.
@@ -53,12 +55,56 @@ URDF_LIMITS_RAD: dict[str, tuple[float, float]] = {
 }
 
 
-def build_slots(arm_joints=None, gripper_joint=None) -> list[Slot]:
+# Qual(is) braço(s) um dataset / uma policy / o pipeline cobre. `both` é o
+# padrão e o layout de sempre (16 dims); `left`/`right` são 8 dims.
+ARMS = ("both", "left", "right")
+
+_ARM_TAG = {"both": "bimanual", "left": "left_arm", "right": "right_arm"}
+
+
+def check_arm(arm: str) -> str:
+    if arm not in ARMS:
+        raise ValueError(f"arm={arm!r} inválido (use {' | '.join(ARMS)})")
+    return arm
+
+
+def sides_for_arm(arm: str) -> tuple[str, ...]:
+    return ("left", "right") if check_arm(arm) == "both" else (arm,)
+
+
+def arm_tag(arm: str) -> str:
+    """Sufixo de nome de dataset: both->bimanual, right->right_arm, left->left_arm."""
+    return _ARM_TAG[check_arm(arm)]
+
+
+def robot_type_for_arm(arm: str) -> str:
+    return "bi_openarm_follower" if check_arm(arm) == "both" else "openarm_follower"
+
+
+def camera_names_for_arm(arm: str) -> list[str]:
+    """Câmeras que um dataset desse braço grava: o peito + o pulso de cada braço
+    coberto. A câmera do pulso do braço ocioso não entra — ela só mostraria um
+    braço parado, e o synchronizer do recorder só dispara com TODAS as assinadas."""
+    return ["cam_chest", *(f"{side}_cam_wrist" for side in sides_for_arm(arm))]
+
+
+def image_keys_for_arm(arm: str) -> list[str]:
+    return [f"observation.images.{n}" for n in camera_names_for_arm(arm)]
+
+
+def build_slots(arm_joints=None, gripper_joint=None, arm: str = "both") -> list[Slot]:
+    """Slots do vetor de estado/ação, na ordem canônica.
+
+    `index` é a posição NO VETOR DESSE `arm`: com `arm="right"` os 8 slots vão de
+    0 a 7 (não de 8 a 15). Recorder, runner, validate e replay chamam esta mesma
+    função com o mesmo `arm`, então a ordem não tem como divergir entre gravar e
+    executar.
+    """
     arm_joints = arm_joints or DEFAULT_ARM_JOINTS
     gripper_joint = gripper_joint or DEFAULT_GRIPPER_JOINT
     slots: list[Slot] = []
     k = 0
-    for side in ("left", "right"):
+    for side in sides_for_arm(arm):
         for n, ros_name in enumerate(arm_joints[side], start=1):
             slots.append(Slot(k, f"{side}_joint_{n}.pos", ros_name, side, False))
             k += 1
@@ -67,5 +113,5 @@ def build_slots(arm_joints=None, gripper_joint=None) -> list[Slot]:
     return slots
 
 
-def feature_names(slots: list[Slot] | None = None) -> list[str]:
-    return [s.feature for s in (slots or build_slots())]
+def feature_names(slots: list[Slot] | None = None, arm: str = "both") -> list[str]:
+    return [s.feature for s in (slots or build_slots(arm=arm))]

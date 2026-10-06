@@ -2,7 +2,8 @@
 
 Produz um dataset com o mesmo layout do pipeline CAN nativo do OpenArm LeRobot
 (`bi_openarm_follower`): observation.state / action de 16 dims e câmeras em vídeo
-AV1. Ver README.md para o schema completo.
+AV1 — ou, com `arm=left|right`, 8 dims e só o peito + o pulso daquele braço. Ver
+README.md para o schema completo.
 """
 from __future__ import annotations
 
@@ -23,6 +24,30 @@ def _looks_like_dataset(root_dir: str) -> bool:
     return os.path.isfile(os.path.join(root_dir, "meta", "info.json"))
 
 
+def schema_problems(existing: dict, requested: dict) -> list[str]:
+    """Diferenças entre as features de um dataset já gravado e as pedidas agora.
+
+    Retomar sem checar isto era perigoso: `LeRobotDataset.resume` usa o schema do
+    disco e ignora o que o recorder acha que está gravando — um recorder `arm=right`
+    (8 dims) apontado pro dataset bimanual (16 dims) só estouraria no meio da sessão,
+    ou pior, gravaria quadros que não batem com o resto do dataset.
+    """
+    problems = []
+    for key, want in requested.items():
+        have = existing.get(key)
+        if have is None:
+            problems.append(f"{key}: o dataset em disco não tem essa feature")
+            continue
+        if tuple(have["shape"]) != tuple(want["shape"]):
+            problems.append(f"{key}: no disco {tuple(have['shape'])}, pedido {tuple(want['shape'])}")
+        if want.get("names") and have.get("names") and list(want["names"]) != list(have["names"]):
+            problems.append(f"{key}: nomes das dims diferem do disco")
+    extra_cams = {k for k in existing if k.startswith("observation.images.")} - set(requested)
+    for key in sorted(extra_cams):
+        problems.append(f"{key}: está no dataset em disco mas não é gravada agora")
+    return problems
+
+
 class LeRobotWriter:
     def __init__(
         self,
@@ -39,6 +64,13 @@ class LeRobotWriter:
         if _looks_like_dataset(root_dir):
             # Retoma um dataset local existente para continuar adicionando episódios.
             self.dataset = LeRobotDataset.resume(repo_id, root=root_dir)
+            problems = schema_problems(self.dataset.meta.features, features)
+            if problems:
+                self.dataset.finalize()
+                raise ValueError(
+                    f"o dataset existente em {root_dir} não bate com o que está sendo "
+                    "gravado (outro --arm?). Use outro dataset_root, ou apague/renomeie "
+                    "o existente:\n  - " + "\n  - ".join(problems))
             self._episodes_saved = self.dataset.meta.total_episodes
         else:
             self.dataset = LeRobotDataset.create(
