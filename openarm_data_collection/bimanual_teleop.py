@@ -2,8 +2,13 @@
 """
 Teleop bimanual OpenArm com IK do MoveIt2.
 Baseado na versão funcional de braço único (squeeze=embreagem, trigger=garra).
+
+Parâmetro `arm` (both | left | right, padrão both): com left/right só esse braço
+é instanciado — sem assinatura do controle do outro lado, sem IK, sem publisher
+no controller dele. Os handlers de botão já ignoram controle desconhecido.
 """
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.action import ActionClient
@@ -23,6 +28,8 @@ import tf2_geometry_msgs
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from tf2_ros import TransformException
+
+from openarm_data_collection.joint_layout import check_arm, sides_for_arm
 
 
 class ArmSide:
@@ -190,10 +197,9 @@ class BiArmTeleopIK(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.tf_static_transform = None
 
-        self.arms = {
-            'left': ArmSide(self, 'left', self.tf_buffer, self.lock),
-            'right': ArmSide(self, 'right', self.tf_buffer, self.lock),
-        }
+        self.arm = check_arm(self.declare_parameter('arm', 'both').value)
+        self.arms = {side: ArmSide(self, side, self.tf_buffer, self.lock)
+                     for side in sides_for_arm(self.arm)}
 
         qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.btn_down_sub = self.create_subscription(String, '/xr/events/button_down', self.btn_down_cb, qos)
@@ -204,7 +210,9 @@ class BiArmTeleopIK(Node):
         self.ik_timer = self.create_timer(0.033, self.ik_request_loop)
         self.check_timer = self.create_timer(1.0, self.check_tf)
 
-        self.get_logger().info('🚀 OPENARM IK BIMANUAL')
+        self.get_logger().info(
+            f"🚀 OPENARM IK {'BIMANUAL' if self.arm == 'both' else 'BRAÇO ' + self.arm.upper()}"
+            f" | braços: {list(self.arms)}")
         self.get_logger().info('⏳ Aguardando /joint_states...')
 
     def joint_cb(self, msg):
@@ -359,11 +367,12 @@ def main(args=None):
     node = BiArmTeleopIK()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):   # SIGINT ou SIGTERM
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
