@@ -3,8 +3,12 @@
     python -m openarm_data_collection.validate_dataset --root /path/do/dataset
     ros2 run openarm_data_collection validate_dataset --root /path
 
-Checa: schema x formato bi_openarm_follower esperado, contagem/duração dos
-episódios, consistência de fps/timestamps e ranges de observation.state / action.
+Checa: schema x layout esperado, contagem/duração dos episódios, consistência de
+fps/timestamps e ranges de observation.state / action.
+
+O braço do dataset (both = 16 dims e 3 câmeras | left/right = 8 dims, peito + pulso)
+é detectado pelos nomes das dims; `--arm` só serve pra exigir um deles — se o dataset
+for de outro braço, reprova em vez de aceitar em silêncio.
 Opcional: --dump-episode N grava alguns frames de cada câmera como PNG.
 """
 from __future__ import annotations
@@ -15,15 +19,18 @@ from pathlib import Path
 
 import numpy as np
 
-EXPECTED_STATE_NAMES = [
-    *(f"left_joint_{i}.pos" for i in range(1, 8)), "left_gripper.pos",
-    *(f"right_joint_{i}.pos" for i in range(1, 8)), "right_gripper.pos",
-]
-EXPECTED_IMAGE_KEYS = {
-    "observation.images.cam_chest",
-    "observation.images.left_cam_wrist",
-    "observation.images.right_cam_wrist",
-}
+from openarm_data_collection.joint_layout import (
+    ARMS, build_slots, feature_names, image_keys_for_arm,
+)
+
+
+def detect_arm(names) -> str | None:
+    """both | left | right conforme os nomes das dims; None se não bate com nenhum."""
+    names = list(names or [])
+    for arm in ARMS:
+        if names == feature_names(build_slots(arm=arm)):
+            return arm
+    return None
 
 
 def _load(root: str):
@@ -41,28 +48,44 @@ def _load(root: str):
     return LeRobotDataset(repo_id=f"local/{root_p.name}", root=str(root_p))
 
 
-def _check_schema(meta) -> list[str]:
+def _check_schema(meta, want_arm: str | None = None) -> tuple[list[str], str | None]:
+    """(problemas, braço detectado). `want_arm` exige um braço específico."""
     problems = []
     feats = meta.features
+    arm = detect_arm((feats.get("observation.state") or {}).get("names"))
+    if arm is None:
+        problems.append(
+            "observation.state: os nomes das dims não batem com nenhum layout "
+            f"({' | '.join(ARMS)})\n  got={(feats.get('observation.state') or {}).get('names')}")
+    elif want_arm and arm != want_arm:
+        problems.append(f"o dataset é arm={arm}, mas --arm={want_arm} foi exigido")
+    if arm is None:
+        return problems, None
+
+    names = feature_names(build_slots(arm=arm))
     for key in ("observation.state", "action"):
         if key not in feats:
             problems.append(f"falta feature {key}")
             continue
         shape = tuple(feats[key]["shape"])
-        if shape != (16,):
-            problems.append(f"{key}: shape {shape}, esperado (16,)")
-        names = feats[key].get("names")
-        if names and list(names) != EXPECTED_STATE_NAMES:
-            problems.append(f"{key}: names diferem do bi_openarm_follower\n  got={names}")
-    missing = EXPECTED_IMAGE_KEYS - set(feats)
+        if shape != (len(names),):
+            problems.append(f"{key}: shape {shape}, esperado ({len(names)},)")
+        got = feats[key].get("names")
+        if got and list(got) != names:
+            problems.append(f"{key}: names diferem do layout arm={arm}\n  got={got}")
+    expected_imgs = set(image_keys_for_arm(arm))
+    missing = expected_imgs - set(feats)
     if missing:
         problems.append(f"faltam câmeras: {sorted(missing)}")
-    for key in EXPECTED_IMAGE_KEYS & set(feats):
+    extras = {k for k in feats if k.startswith("observation.images.")} - expected_imgs
+    if extras:
+        problems.append(f"câmeras que arm={arm} não deveria ter: {sorted(extras)}")
+    for key in expected_imgs & set(feats):
         if feats[key]["dtype"] != "video":
             problems.append(f"{key}: dtype {feats[key]['dtype']}, esperado 'video'")
     if getattr(meta, "fps", None) != 30:
         problems.append(f"fps = {getattr(meta, 'fps', None)} (referência usa 30)")
-    return problems
+    return problems, arm
 
 
 def _episode_stats(ds) -> list[str]:
@@ -84,14 +107,14 @@ def _episode_stats(ds) -> list[str]:
     return lines
 
 
-def _range_report(ds) -> list[str]:
+def _range_report(ds, names: list[str]) -> list[str]:
     hf = ds.hf_dataset
     out = []
     for key in ("observation.state", "action"):
         arr = np.asarray(hf[key], dtype=np.float32)
         lo, hi = arr.min(axis=0), arr.max(axis=0)
         out.append(f"  {key}:")
-        for i, name in enumerate(EXPECTED_STATE_NAMES):
+        for i, name in enumerate(names):
             out.append(f"    {name:<18} [{lo[i]:8.3f}, {hi[i]:8.3f}]")
     return out
 
@@ -107,7 +130,7 @@ def _dump_episode(ds, ep: int, dst: str):
     picks = idxs[:: max(1, len(idxs) // 5)][:5]
     for gi in picks:
         item = ds[int(gi)]
-        for key in EXPECTED_IMAGE_KEYS & set(ds.meta.features):
+        for key in sorted(k for k in ds.meta.features if k.startswith("observation.images.")):
             img = item[key]
             arr = (img.numpy() if hasattr(img, "numpy") else np.asarray(img))
             if arr.shape[0] in (1, 3):  # CHW -> HWC
@@ -122,6 +145,8 @@ def _dump_episode(ds, ep: int, dst: str):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
+    ap.add_argument("--arm", choices=ARMS, default=None,
+                    help="exige este braço (padrão: detecta pelo schema e aceita qualquer um)")
     ap.add_argument("--dump-episode", type=int, default=None)
     ap.add_argument("--dump-dir", default="/tmp/dataset_preview")
     args, _ = ap.parse_known_args(argv)
@@ -135,15 +160,17 @@ def main(argv=None):
           f"robot_type={info.get('robot_type', '?')}  fps={getattr(meta, 'fps', '?')}")
     print(f"episódios={meta.total_episodes}  frames={meta.total_frames}  tarefas={meta.total_tasks}")
 
-    problems = _check_schema(meta)
+    problems, arm = _check_schema(meta, args.arm)
     print("\n-- schema --")
-    print("  OK (compatível com bi_openarm_follower)" if not problems
+    print(f"  OK (arm={arm}: {len(feature_names(build_slots(arm=arm)))} dims, "
+          f"câmeras {[k.split('.')[-1] for k in image_keys_for_arm(arm)]})" if not problems
           else "\n".join(f"  ❌ {p}" for p in problems))
 
     print("\n-- episódios --")
     print("\n".join(_episode_stats(ds)))
-    print("\n-- ranges --")
-    print("\n".join(_range_report(ds)))
+    if arm is not None:
+        print("\n-- ranges --")
+        print("\n".join(_range_report(ds, feature_names(build_slots(arm=arm)))))
 
     if args.dump_episode is not None:
         print()

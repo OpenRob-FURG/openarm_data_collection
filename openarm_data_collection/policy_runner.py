@@ -87,7 +87,9 @@ from std_msgs.msg import Bool, Float64MultiArray
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from openarm_data_collection.image_utils import to_dataset_frame
-from openarm_data_collection.joint_layout import URDF_LIMITS_RAD, build_slots
+from openarm_data_collection.joint_layout import (
+    ARMS, URDF_LIMITS_RAD, build_slots, check_arm, sides_for_arm,
+)
 
 LOG_PERIOD_S = 1.0   # intervalo do log periódico (em tempo, não em ticks)
 
@@ -160,17 +162,17 @@ class PolicyRunner(Node):
     def __init__(self, args):
         super().__init__("policy_runner")
         self.args = args
-        self.slots = build_slots()
-        # Slots que a POLICY controla. Num checkpoint unimanual (ex.: 8 dims, só o
-        # braço direito) a ação/estado têm 8 posições, não 16 — `pidx` traduz
-        # junta ROS -> índice no vetor da policy. O braço fora de `--arm` nem
-        # recebe comando (não é "segurado", simplesmente não é publicado).
-        self.arm = args.arm
-        self.active_slots = [s for s in self.slots if self.arm == "both" or s.side == self.arm]
-        self.active_sides = [side for side in ("left", "right")
-                             if any(s.side == side for s in self.active_slots)]
+        # Slots que a POLICY controla, montados pela MESMA função do recorder
+        # (joint_layout.build_slots): a ordem do vetor de estado/ação não tem como
+        # divergir entre gravar e executar. Num checkpoint unimanual (ex.: 8 dims, só
+        # o braço direito) são 8 posições indexadas de 0 a 7; `pidx` traduz junta ROS
+        # -> índice no vetor da policy. O braço fora de `--arm` nem recebe comando
+        # (não é "segurado", simplesmente não é publicado).
+        self.arm = check_arm(args.arm)
+        self.active_slots = build_slots(arm=self.arm)
+        self.active_sides = list(sides_for_arm(self.arm))
         self.n_dims = len(self.active_slots)
-        self.pidx = {s.ros_joint: i for i, s in enumerate(self.active_slots)}
+        self.pidx = {s.ros_joint: s.index for s in self.active_slots}
         self.device = args.device
 
         self.get_logger().info(f"carregando {args.checkpoint} em {self.device}...")
@@ -570,7 +572,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="roda a policy mas não publica nos controllers")
     ap.add_argument("--auto-arm", action="store_true", help="já começa armado (cuidado)")
 
-    ap.add_argument("--arm", choices=("both", "right", "left"), default="both",
+    ap.add_argument("--arm", choices=ARMS, default="both",
                     help="qual(is) braço(s) a policy controla. both = 16 dims; right/left = "
                          "8 dims (checkpoint unimanual). O outro braço não recebe comando "
                          "nenhum e as câmeras que a policy não usa nem são assinadas.")
