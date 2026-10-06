@@ -1,8 +1,10 @@
 # openarm_data_collection
 
-Coleta de dataset para teleop **bimanual** do OpenArm via TeleopXR (WebXR / Meta
-Quest), gravando no formato **LeRobot codebase v3.0**, compatível com as
-convenções do `bi_openarm_follower` do OpenArm LeRobot.
+Coleta de dataset para teleop do OpenArm via TeleopXR (WebXR / Meta Quest),
+gravando no formato **LeRobot codebase v3.0**, compatível com as convenções do
+`bi_openarm_follower` do OpenArm LeRobot. Por padrão **bimanual**; com
+`arm:=right|left` grava (e depois executa) **um braço só** — ver
+[Gravar um braço só](#gravar-um-braço-só).
 
 ## Schema do dataset
 
@@ -23,6 +25,42 @@ Igual ao pipeline CAN nativo (`bi_openarm_follower`), estendido para 3 câmeras:
 - **Diferença vs. referência de 1 braço:** aquele dataset é 8-dim
   (`joint_1.pos…gripper.pos`, `cam_chest`+`cam_wrist`). Este é bimanual (16-dim,
   3 câmeras) — mesmo pipeline e convenções, mas policy nova.
+
+## Gravar um braço só
+
+`arm:=both|left|right` (padrão `both`) é um parâmetro único do pipeline: o launch
+repassa o mesmo valor ao `episode_recorder`, ao `bimanual_teleop` e ao `home_mover`,
+e o `policy_runner` aceita `arm:=` igual.
+
+```bash
+ros2 launch openarm_data_collection data_collection.launch.py \
+    arm:=right task_name:="pegar o lego"
+```
+
+| `arm` | `state` / `action` | câmeras gravadas | `robot_type` | dataset (default) |
+|---|---|---|---|---|
+| `both` | 16 dims | `cam_chest`, `left_cam_wrist`, `right_cam_wrist` | `bi_openarm_follower` | `~/datasets/openarm_bimanual_vr` |
+| `right` | 8 dims: `right_joint_1.pos … right_gripper.pos` | `cam_chest`, `right_cam_wrist` | `openarm_follower` | `~/datasets/openarm_right_arm_vr` |
+| `left` | 8 dims: `left_joint_1.pos … left_gripper.pos` | `cam_chest`, `left_cam_wrist` | `openarm_follower` | `~/datasets/openarm_left_arm_vr` |
+
+- **Mesmos nomes e ordem do bimanual**: o `right` é exatamente a fatia dos últimos 8
+  dims do `both`. Dá pra treinar numa fatia do dataset bimanual e executar com
+  `arm:=right`, e datasets de um braço continuam concatenáveis com os outros.
+- O **driver do pulso ocioso nem sobe** (e o recorder não o assina — o
+  synchronizer só dispara com *todas* as câmeras assinadas, então uma câmera
+  inútil derrubaria a gravação se caísse).
+- Cada `arm` ganha o **próprio diretório**. Se você apontar `dataset_root` pra um
+  dataset de schema diferente, o recorder **aborta na partida** listando as
+  diferenças, em vez de gravar por cima.
+- O `home_mover` leva **os dois braços** pra home no startup (tira o ocioso da
+  singularidade e deixa ele na pose de repouso que aparece na câmera do peito);
+  depois de cada episódio só o braço ativo volta.
+- **Teleop**: o braço fora de `arm` não é instanciado. No `teleop_xr`, omita
+  `--wrist-left-topic` / `--wrist-right-topic` do braço ocioso (são opcionais).
+  Os botões **A/B são do controle direito** — gravando só o esquerdo você
+  teleopera com o esquerdo e aperta A/B com o direito.
+- Executar: `policy_runner.launch.py … arm:=right` (a dimensão da ação do checkpoint
+  tem que bater; senão ele aborta na partida dizendo qual `arm` usar).
 
 ## Setup (uma vez)
 
@@ -106,7 +144,8 @@ automaticamente. Após o **B** há uma pausa de alguns segundos enquanto os
 
 ### Args do launch
 
-`cameras:=false` (usar seus próprios drivers), `home_mover:=false`,
+`arm:=both|left|right` (ver acima), `cameras:=false` (usar seus próprios
+drivers), `home_mover:=false`,
 `repo_id:=org/nome`, `python:=/caminho`. `chest_camera:=`, `wrist_driver:=`,
 `chest_serial:=`, `*_wrist_device:=` sobrescrevem por sessão o que já vem do
 `cameras:` do yaml — normalmente não precisa passar nenhum deles.
@@ -123,8 +162,10 @@ Para gravar em **graus** como o pipeline CAN: `arm_angle_scale: 57.29578`.
 # ou: ros2 run openarm_data_collection validate_dataset --root <path>
 ```
 
-Checa schema vs. `bi_openarm_follower`, contagem/duração/jitter dos episódios,
-ranges de `state`/`action`, e (com `--dump-episode N`) grava PNGs de amostra.
+Checa o schema, contagem/duração/jitter dos episódios, ranges de `state`/`action`,
+e (com `--dump-episode N`) grava PNGs de amostra. O `arm` do dataset é **detectado
+pelos nomes das dims** (both = 16, left/right = 8); `--arm right` exige um braço
+específico e reprova se o dataset for de outro.
 
 ## Testar o movimento gravado (sem modelo)
 
@@ -159,13 +200,14 @@ Ainda não implementado.
 | Arquivo | Papel |
 |---|---|
 | `episode_recorder.py` | nó principal: sincroniza `/joint_states` + 3 câmeras, monta state/action, grava via LeRobot |
-| `joint_layout.py` | layout canônico dos 16 dims + limites do URDF (fonte única: recorder, replay, runner) |
-| `lerobot_writer.py` | wrapper de `LeRobotDataset` (create/resume/add_frame/save/discard/finalize), offline |
+| `joint_layout.py` | layout canônico do vetor (`build_slots(arm=)`: 16 dims `both` ou 8 `left/right`, reindexado de 0) + câmeras por braço + limites do URDF. Fonte única: recorder, validate, replay, runner |
+| `lerobot_writer.py` | wrapper de `LeRobotDataset` (create/resume/add_frame/save/discard/finalize), offline. Recusa retomar dataset de schema diferente |
 | `image_utils.py` | `sensor_msgs` → numpy RGB uint8 sem `cv_bridge` |
 | `xr_buttons.py` | eventos brutos do TeleopXR → START/STOP/DISCARD |
 | `home_mover.py` | leva os braços pra home **suavemente** (trajetória com ~80 waypoints, ease-in-out cosseno, lê a pose atual do `/joint_states`). Gatilho: `/data_collection/go_home` ou botão B |
 | `dataset_replay.py` | republica o `action` gravado nos controllers (teste sem modelo) |
-| `validate_dataset.py` | verificação pós-gravação |
+| `validate_dataset.py` | verificação pós-gravação (detecta o `arm`) |
+| `policy_runner.py` | roda uma policy LeRobot (ACT, SmolVLA…) no robô via ROS; `--arm` p/ checkpoints de 8 dims |
 
 ## Robô: v1.0
 
