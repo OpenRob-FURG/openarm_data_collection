@@ -137,12 +137,14 @@ class HomeMover(Node):
         if event is self._RecordingEvent.HOME:
             self.go_home()
 
-    def _waypoints(self, joints, home) -> list[list[float]] | None:
+    def _waypoints(self, joints, home, side="") -> list[list[float]] | None:
         """Lista de posições (joint1..joint7) da pose atual até a home."""
         if not all(j in self._pos for j in joints):
             faltando = [j for j in joints if j not in self._pos]
             self.get_logger().warn(
-                f"sem /joint_states para {faltando} — home abortado")
+                f"sem /joint_states para {faltando} [{side}] — esse braço não vai pra home "
+                f"(confira left/right_arm_joint_names no yaml e o que "
+                f"o bringup publica)")
             return None
         start = [self._pos[j] for j in joints]
         n = max(2, int(round(self.move_duration / self.waypoint_dt)))
@@ -170,11 +172,15 @@ class HomeMover(Node):
                 "right": (self.right_joints, self.right_home)}
         wps = {}
         for side in sides:
-            wp = self._waypoints(*spec[side])
+            wp = self._waypoints(*spec[side], side=side)
             if wp is None:
-                return
+                if side in self.active_sides:
+                    return           # o braço que vai gravar não pode ir pra home: aborta
+                continue             # braço ocioso sem juntas (ex.: bringup de um braço só): segue sem ele
             wps[side] = wp
-        self._check_subscribers(sides)
+        if not wps:
+            return
+        self._check_subscribers(tuple(wps))
         n = len(next(iter(wps.values())))
 
         if self.mode == "trajectory":
