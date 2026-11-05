@@ -1,233 +1,245 @@
+<p align="center">
+  <img src="images/openrob_logo.png" alt="OpenRob project logo" width="700" />
+</p>
+
 # openarm_data_collection
 
-Coleta de dataset para teleop do OpenArm via TeleopXR (WebXR / Meta Quest),
-gravando no formato **LeRobot codebase v3.0**, compatível com as convenções do
-`bi_openarm_follower` do OpenArm LeRobot. Por padrão **bimanual**; com
-`arm:=right|left` grava (e depois executa) **um braço só** — ver
-[Gravar um braço só](#gravar-um-braço-só).
+Dataset collection for OpenArm teleop via TeleopXR (WebXR / Meta Quest),
+recording in **LeRobot codebase v3.0** format, compatible with the
+`bi_openarm_follower` conventions of OpenArm LeRobot. **Bimanual** by default;
+with `arm:=right|left` it records (and later runs) **a single arm** — see
+[Recording a single arm](#recording-a-single-arm).
 
-## Schema do dataset
+## Documentation
 
-Igual ao pipeline CAN nativo (`bi_openarm_follower`), estendido para 3 câmeras:
+- Physical arm bringup: [`openarm_ros2`](https://github.com/OpenRob-FURG/openarm_ros2)
+- Manipulation stack (MoveIt Task Constructor): [`openarm-mtc`](https://github.com/OpenRob-FURG/openarm-mtc)
+- OpenArm simulation / RL: [`openarm_isaac_lab`](https://github.com/OpenRob-FURG/openarm_isaac_lab)
+- Arm CAD and assembly: [`openarm_hardware`](https://github.com/OpenRob-FURG/openarm_hardware)
+- Dataset format and training: [LeRobot](https://github.com/huggingface/lerobot)
 
-| Feature | dtype | shape | conteúdo |
+## Dataset schema
+
+Same as the native CAN pipeline (`bi_openarm_follower`), extended to 3 cameras:
+
+| Feature | dtype | shape | content |
 |---|---|---|---|
 | `observation.state` | float32 | (16,) | `left_joint_1.pos … left_joint_7.pos, left_gripper.pos, right_joint_1.pos … right_joint_7.pos, right_gripper.pos` |
-| `action` | float32 | (16,) | mesmos nomes; **alvo comandado** pelo teleop (controllers + garras) |
-| `observation.images.cam_chest` | video | (480,640,3) | câmera do peito (C270 ou RealSense D435i) |
-| `observation.images.left_cam_wrist` | video | (480,640,3) | webcam do pulso esquerdo |
-| `observation.images.right_cam_wrist` | video | (480,640,3) | webcam do pulso direito |
+| `action` | float32 | (16,) | same names; **target commanded** by teleop (controllers + grippers) |
+| `observation.images.cam_chest` | video | (480,640,3) | chest camera (C270 or RealSense D435i) |
+| `observation.images.left_cam_wrist` | video | (480,640,3) | left wrist webcam |
+| `observation.images.right_cam_wrist` | video | (480,640,3) | right wrist webcam |
 
-- fps 30, vídeo AV1 (`libsvtav1`), `robot_type: bi_openarm_follower`.
-- **Unidades:** as juntas são gravadas como o `/joint_states` publica —
-  **radianos** por padrão. O dataset de referência `openarm_follower` (pipeline
-  CAN) usa **graus**; para gravar igual, ver `arm_angle_scale` abaixo.
-- **Diferença vs. referência de 1 braço:** aquele dataset é 8-dim
-  (`joint_1.pos…gripper.pos`, `cam_chest`+`cam_wrist`). Este é bimanual (16-dim,
-  3 câmeras) — mesmo pipeline e convenções, mas policy nova.
+- fps 30, AV1 video (`libsvtav1`), `robot_type: bi_openarm_follower`.
+- **Units:** joints are recorded as published by `/joint_states` —
+  **radians** by default. The reference `openarm_follower` dataset (CAN
+  pipeline) uses **degrees**; to record the same way, see `arm_angle_scale` below.
+- **Difference vs. the single-arm reference:** that dataset is 8-dim
+  (`joint_1.pos…gripper.pos`, `cam_chest`+`cam_wrist`). This one is bimanual (16-dim,
+  3 cameras) — same pipeline and conventions, but a new policy.
 
-## Gravar um braço só
+## Recording a single arm
 
-`arm:=both|left|right` (padrão `both`) é um parâmetro único do pipeline: o launch
-repassa o mesmo valor ao `episode_recorder`, ao `bimanual_teleop` e ao `home_mover`,
-e o `policy_runner` aceita `arm:=` igual.
+`arm:=both|left|right` (default `both`) is a single pipeline parameter: the launch
+file forwards the same value to `episode_recorder`, `bimanual_teleop`, and `home_mover`,
+and `policy_runner` accepts `arm:=` the same way.
 
 ```bash
 ros2 launch openarm_data_collection data_collection.launch.py \
-    arm:=right task_name:="pegar o lego"
+    arm:=right task_name:="pick up the lego"
 ```
 
-| `arm` | `state` / `action` | câmeras gravadas | `robot_type` | dataset (default) |
+| `arm` | `state` / `action` | recorded cameras | `robot_type` | dataset (default) |
 |---|---|---|---|---|
 | `both` | 16 dims | `cam_chest`, `left_cam_wrist`, `right_cam_wrist` | `bi_openarm_follower` | `~/datasets/openarm_bimanual_vr` |
 | `right` | 8 dims: `right_joint_1.pos … right_gripper.pos` | `cam_chest`, `right_cam_wrist` | `openarm_follower` | `~/datasets/openarm_right_arm_vr` |
 | `left` | 8 dims: `left_joint_1.pos … left_gripper.pos` | `cam_chest`, `left_cam_wrist` | `openarm_follower` | `~/datasets/openarm_left_arm_vr` |
 
-- **Mesmos nomes e ordem do bimanual**: o `right` é exatamente a fatia dos últimos 8
-  dims do `both`. Dá pra treinar numa fatia do dataset bimanual e executar com
-  `arm:=right`, e datasets de um braço continuam concatenáveis com os outros.
-- O **driver do pulso ocioso nem sobe** (e o recorder não o assina — o
-  synchronizer só dispara com *todas* as câmeras assinadas, então uma câmera
-  inútil derrubaria a gravação se caísse).
-- Cada `arm` ganha o **próprio diretório**. Se você apontar `dataset_root` pra um
-  dataset de schema diferente, o recorder **aborta na partida** listando as
-  diferenças, em vez de gravar por cima.
-- O `home_mover` leva **os dois braços** pra home no startup (tira o ocioso da
-  singularidade e deixa ele na pose de repouso que aparece na câmera do peito);
-  depois de cada episódio só o braço ativo volta.
-- **Teleop**: o braço fora de `arm` não é instanciado. No `teleop_xr`, omita
-  `--wrist-left-topic` / `--wrist-right-topic` do braço ocioso (são opcionais).
-  Os botões **A/B são do controle direito** — gravando só o esquerdo você
-  teleopera com o esquerdo e aperta A/B com o direito.
-- Executar: `policy_runner.launch.py … arm:=right` (a dimensão da ação do checkpoint
-  tem que bater; senão ele aborta na partida dizendo qual `arm` usar).
+- **Same names and order as bimanual**: `right` is exactly the slice of the last 8
+  dims of `both`. You can train on a slice of the bimanual dataset and run it with
+  `arm:=right`, and single-arm datasets remain concatenable with each other.
+- The **idle wrist's driver isn't even started** (and the recorder doesn't subscribe
+  to it — the synchronizer only fires once *all* subscribed cameras publish, so an
+  unused camera going down would otherwise kill the recording).
+- Each `arm` gets its **own directory**. If you point `dataset_root` at a
+  dataset with a different schema, the recorder **aborts at startup** listing the
+  differences, instead of overwriting it.
+- `home_mover` moves **both arms** home on startup (moves the idle one out of its
+  singularity and into the rest pose visible in the chest camera); after each
+  episode only the active arm returns home.
+- **Teleop**: the arm outside of `arm` is not instantiated. In `teleop_xr`, omit
+  `--wrist-left-topic` / `--wrist-right-topic` for the idle arm (they're optional).
+  The **A/B buttons belong to the right controller** — if you're only recording the
+  left arm, you teleoperate with the left controller and press A/B with the right one.
+- Running: `policy_runner.launch.py … arm:=right` (the checkpoint's action
+  dimension must match; otherwise it aborts at startup telling you which `arm` to use).
 
-## Setup (uma vez)
+## Setup (one-time)
 
 ```bash
-# driver das webcams
-sudo apt install -y ros-jazzy-v4l2-camera        # realsense2-camera já instalado
+# webcam driver
+sudo apt install -y ros-jazzy-v4l2-camera        # realsense2-camera already installed
 
-# venv Python 3.12 com rclpy (ROS) + lerobot no mesmo processo
+# Python 3.12 venv with rclpy (ROS) + lerobot in the same process
 python3.12 -m venv --system-site-packages ~/openarm_ws/.venv312
 ~/openarm_ws/.venv312/bin/pip install "lerobot[dataset]==0.6.1" "scipy>=1.13"
 
 cd ~/openarm_ws && colcon build --packages-select openarm_data_collection --symlink-install
 ```
 
-Por que o venv: `lerobot` exige Python ≥3.12 + NumPy ≥2; o `rclpy` do Jazzy é
-Python 3.12. O `--system-site-packages` dá acesso ao `rclpy`. Não usamos
-`cv_bridge` (quebra sob NumPy 2) — a decodificação de imagem é feita em
+Why the venv: `lerobot` requires Python ≥3.12 + NumPy ≥2; Jazzy's `rclpy` is
+Python 3.12. `--system-site-packages` gives access to `rclpy`. We don't use
+`cv_bridge` (it breaks under NumPy 2) — image decoding is handled in
 `image_utils.py`.
 
-## Uso
+## Usage
 
-Com o robô já em teleop (ros2_control + `teleop_xr` no modo ROS publicando nos
-`*_joint_trajectory_controller` e `*_gripper_controller`):
+With the robot already in teleop (ros2_control + `teleop_xr` in ROS mode publishing to
+the `*_joint_trajectory_controller` and `*_gripper_controller` topics):
 
 ```bash
 source ~/openarm_ws/install/setup.bash
 ros2 launch openarm_data_collection data_collection.launch.py \
-    task_name:="pegar o copo vermelho" \
+    task_name:="pick up the red cup" \
     dataset_root:=/home/popzap-lab/datasets/openarm_bimanual_vr
 ```
 
-Sobe RealSense D435i (peito) + 2 câmeras de pulso (webcam `v4l2_camera` ou RealSense
-D405, por pulso) + `episode_recorder` + `home_mover`. Verificado com hardware real (2026-09-09): 3 câmeras a ~30 fps,
-episódio gravado e validado.
+Brings up the RealSense D435i (chest) + 2 wrist cameras (`v4l2_camera` webcam or
+RealSense D405, per wrist) + `episode_recorder` + `home_mover`. Verified with real
+hardware (2026-09-09): 3 cameras at ~30 fps, episode recorded and validated.
 
-**Devices de câmera ficam em `config/recording_params.yaml` (bloco `cameras:`)**,
-não no launch — é ali que se edita quando uma porta USB muda:
+**Camera devices live in `config/recording_params.yaml` (the `cameras:` block)**,
+not in the launch file — that's where you edit things when a USB port changes:
 
 ```yaml
 cameras:
   chest_camera: realsense        # realsense | v4l2
   left_wrist_camera: v4l2        # realsense (D405) | v4l2 (webcam)
   right_wrist_camera: realsense
-  wrist_driver: usb_cam          # driver das webcams: usb_cam (MJPG) | v4l2 (YUYV)
-  chest_serial: ""               # serial das RealSense: obrigatório se houver 2+ no launch
+  wrist_driver: usb_cam          # webcam driver: usb_cam (MJPG) | v4l2 (YUYV)
+  chest_serial: ""               # RealSense serial: required if there are 2+ in the launch
   left_wrist_serial: ""
   right_wrist_serial: ""
   left_wrist_device: "/dev/v4l/by-path/...-usb-0:4:1.0-video-index0"
   right_wrist_device: "/dev/v4l/by-path/...-usb-0:10.4:1.0-video-index0"
 ```
 
-⚠️ **As 2 C270 andam desconectando/reconectando sozinhas** (cabo/hub com mau
-contato) e **trocam de porta USB** quando isso acontece. Se a gravação vier com
-a câmera errada (ou sem imagem), confere antes de editar o yaml:
+**Warning:** the 2 C270s sometimes disconnect/reconnect on their own (bad
+cable/hub contact) and **swap USB ports** when that happens. If a recording comes
+out with the wrong camera (or no image), check before editing the yaml:
 ```bash
-ls -l /dev/v4l/by-path/          # portas atuais
+ls -l /dev/v4l/by-path/          # current ports
 ```
-e tira uma captura de teste de cada `/dev/videoN` candidato (o conteúdo do
-frame diz qual pulso é — ex. um objeto de referência visível só de um lado)
-antes de decidir qual porta é esquerda/direita.
+and take a test capture from each candidate `/dev/videoN` (the frame content tells
+you which wrist it is — e.g. a reference object visible from only one side)
+before deciding which port is left/right.
 
-- As C270 têm serial de fábrica igual → **`by-id` colide, use `by-path`** (já é o default).
-  O launch resolve o symlink pra `/dev/videoN` (o `usb_cam` não segue symlink).
-- **RealSense nos pulsos (D405)**: `right_wrist_camera: realsense` (e/ou `left_`).
-  Qualquer que seja o driver, a imagem do pulso sai em `/{left,right}_wrist/image_raw`
-  (a RealSense é remapeada pra isso) — recorder, runner e datasets não mudam.
-  Cada câmera é mista à vontade (um pulso D405, o outro webcam).
-- **Seriais**: com **uma** RealSense no launch o serial pode ficar vazio. Com **duas ou
-  mais** (peito + D405) ele é obrigatório em todas — senão o peito pode abrir a D405 do
-  pulso — e o launch aborta com a lista do que falta. Descubra com
-  `rs-enumerate-devices -s` (um aparelho por vez conectado ajuda a saber quem é quem) e
-  ponha no yaml (`chest_serial`, `right_wrist_serial`...) ou `right_wrist_serial:=XXXX`.
-  O launch já acrescenta o `_` que o driver espera na frente do serial. As RealSense
-  sobem escalonadas (3 s entre uma e outra) pra não disputar a enumeração do USB.
-  A D405 usa `depth_module.color_profile` (não tem sensor RGB separado); IMU desligada.
-- **Serial do peito**: o serial já mudou entre sessões (outra unidade, cabo reconectando
-  diferente) — se trocar a câmera do peito, atualize `chest_serial`.
-- **IMU da RealSense desligada** no launch: o driver `hid-sensor` do kernel prende
-  o gyro/accel (`Permission denied` / `Hid device is busy`). Não precisamos dela.
-- **Webcams via `usb_cam` + MJPG** (`wrist_driver:=usb_cam`, default). Verificado:
-  as 2 C270 no mesmo hub USB2 a **30 fps limpo**. Com `v4l2_camera` (YUYV cru) as
-  2 juntas no mesmo hub davam **tearing** (frames rasgados apesar do `hz`=30) —
-  use `v4l2` só se separar as webcams em controladoras USB diferentes.
+- The C270s share the same factory serial → **`by-id` collides, use `by-path`** (already the default).
+  The launch file resolves the symlink to `/dev/videoN` (`usb_cam` doesn't follow symlinks).
+- **RealSense on the wrists (D405)**: `right_wrist_camera: realsense` (and/or `left_`).
+  Whatever the driver, the wrist image comes out on `/{left,right}_wrist/image_raw`
+  (the RealSense is remapped to that) — the recorder, runner, and datasets don't change.
+  Cameras can be mixed freely (one wrist D405, the other a webcam).
+- **Serials**: with **one** RealSense in the launch, the serial can be left empty. With **two or
+  more** (chest + D405) it's required on all of them — otherwise the chest one might open the
+  wrist's D405 — and the launch aborts listing what's missing. Find them with
+  `rs-enumerate-devices -s` (connecting one device at a time helps tell them apart) and
+  put them in the yaml (`chest_serial`, `right_wrist_serial`...) or `right_wrist_serial:=XXXX`.
+  The launch already prepends the `_` the driver expects before the serial. RealSense
+  cameras come up staggered (3 s apart) so they don't fight over USB enumeration.
+  The D405 uses `depth_module.color_profile` (it has no separate RGB sensor); IMU disabled.
+- **Chest serial**: the serial has already changed between sessions (different unit, cable
+  reconnecting differently) — if you swap the chest camera, update `chest_serial`.
+- **RealSense IMU disabled** in the launch: the kernel's `hid-sensor` driver holds
+  the gyro/accel (`Permission denied` / `Hid device is busy`). We don't need it.
+- **Webcams via `usb_cam` + MJPG** (`wrist_driver:=usb_cam`, default). Verified:
+  both C270s on the same USB2 hub at a **clean 30 fps**. With `v4l2_camera` (raw YUYV) the
+  two together on the same hub showed **tearing** (torn frames despite `hz`=30) —
+  only use `v4l2` if you put the webcams on different USB controllers.
 
-### Controle (Meta Quest, via `xr_buttons`)
+### Controls (Meta Quest, via `xr_buttons`)
 
-| Botão | Evento | Ação |
+| Button | Event | Action |
 |---|---|---|
-| **A** (tap, controle direito) | START | começa um episódio |
-| **B** (tap, controle direito) | STOP | salva o episódio, depois manda os braços pra home (`/data_collection/go_home`) |
-| **X** (long-press, controle esquerdo) | DISCARD | descarta o episódio em andamento |
+| **A** (tap, right controller) | START | starts an episode |
+| **B** (tap, right controller) | STOP | saves the episode, then sends the arms home (`/data_collection/go_home`) |
+| **X** (long-press, left controller) | DISCARD | discards the episode in progress |
 
-Episódios com menos de `min_episode_frames` (15) são descartados
-automaticamente. Após o **B** há uma pausa de alguns segundos enquanto os
-3 vídeos são codificados em AV1.
+Episodes shorter than `min_episode_frames` (15) are discarded
+automatically. After **B** there's a pause of a few seconds while the
+3 videos are encoded to AV1.
 
-### Args do launch
+### Launch arguments
 
-`arm:=both|left|right` (ver acima), `cameras:=false` (usar seus próprios
+`arm:=both|left|right` (see above), `cameras:=false` (use your own
 drivers), `home_mover:=false`,
-`repo_id:=org/nome`, `python:=/caminho`. `chest_camera:=`, `wrist_driver:=`,
-`{left,right}_wrist_camera:=`, `chest_serial:=`, `*_wrist_serial:=`, `*_wrist_device:=` sobrescrevem por sessão o que já vem do
-`cameras:` do yaml — normalmente não precisa passar nenhum deles.
+`repo_id:=org/name`, `python:=/path`. `chest_camera:=`, `wrist_driver:=`,
+`{left,right}_wrist_camera:=`, `chest_serial:=`, `*_wrist_serial:=`, `*_wrist_device:=` override, for a single session, what already comes from
+the yaml's `cameras:` block — you normally don't need to pass any of them.
 
-Parâmetros finos (tópicos, nomes de junta, `arm_angle_scale`,
-`gripper_scale/offset`, `sync_slop`) em `config/recording_params.yaml`.
-Para gravar em **graus** como o pipeline CAN: `arm_angle_scale: 57.29578`.
+Fine-grained parameters (topics, joint names, `arm_angle_scale`,
+`gripper_scale/offset`, `sync_slop`) live in `config/recording_params.yaml`.
+To record in **degrees** like the CAN pipeline: `arm_angle_scale: 57.29578`.
 
-## Validação
+## Validation
 
 ```bash
 ~/openarm_ws/.venv312/bin/python -m openarm_data_collection.validate_dataset \
     --root /home/popzap-lab/datasets/openarm_bimanual_vr --dump-episode 0
-# ou: ros2 run openarm_data_collection validate_dataset --root <path>
+# or: ros2 run openarm_data_collection validate_dataset --root <path>
 ```
 
-Checa o schema, contagem/duração/jitter dos episódios, ranges de `state`/`action`,
-e (com `--dump-episode N`) grava PNGs de amostra. O `arm` do dataset é **detectado
-pelos nomes das dims** (both = 16, left/right = 8); `--arm right` exige um braço
-específico e reprova se o dataset for de outro.
+Checks the schema, episode count/duration/jitter, `state`/`action` ranges,
+and (with `--dump-episode N`) saves sample PNGs. The dataset's `arm` is **detected
+from the dim names** (both = 16, left/right = 8); `--arm right` requires a specific
+arm and fails if the dataset is for a different one.
 
-## Testar o movimento gravado (sem modelo)
+## Testing the recorded motion (without a model)
 
-Prova que radiano + ordem das juntas + fiação estão certos: republica o `action`
-gravado nos controllers.
+Proves that radians + joint order + wiring are correct: republishes the recorded
+`action` to the controllers.
 
 ```bash
-# 1) checagem seca — não move nada, compara os ranges com os limites do URDF
+# 1) dry run — doesn't move anything, compares ranges against the URDF limits
 ros2 run openarm_data_collection dataset_replay \
     --root <path> --episode 0 --dry-run
 
-# 2) replay lento, indo devagar até o 1º frame primeiro
+# 2) slow replay, easing into the 1st frame first
 ~/openarm_ws/.venv312/bin/python -m openarm_data_collection.dataset_replay \
     --root <path> --episode 0 --rate-scale 0.25 --goto-start
 ```
 
-Aborta sozinho se o episódio exceder os limites do URDF (`--skip-limit-check`
-força). Precisa do venv 3.12 pra ler o dataset — `ros2 run` funciona pro
-`--dry-run`, mas o replay real é melhor pelo `.venv312/bin/python -m ...`.
+Aborts automatically if the episode exceeds the URDF limits (`--skip-limit-check`
+overrides it). Needs the 3.12 venv to read the dataset — `ros2 run` works for
+`--dry-run`, but the real replay is better run via `.venv312/bin/python -m ...`.
 
-## Deploy da policy
+## Policy deployment
 
-Treino é padrão: `lerobot-train` lê o dataset direto. **Inferência fica no ROS**
-(não `lerobot-rollout`/`lerobot-eval`, que instanciam o robô CAN e conflitam com
-o ros2_control). O runner de policy é um nó que assina `/joint_states` + câmeras,
-roda `PreTrainedPolicy.from_pretrained`, e publica nos mesmos tópicos do
-`dataset_replay` — passando por um safety wrapper (clip de delta + limites).
-Ainda não implementado.
+Training is standard: `lerobot-train` reads the dataset directly. **Inference stays in
+ROS** (not `lerobot-rollout`/`lerobot-eval`, which instantiate the CAN robot and
+conflict with `ros2_control`). The policy runner is a node that subscribes to
+`/joint_states` + cameras, runs `PreTrainedPolicy.from_pretrained`, and publishes to the
+same topics as `dataset_replay` — going through a safety wrapper (delta clipping +
+limits). Not implemented yet.
 
-## Componentes
+## Components
 
-| Arquivo | Papel |
+| File | Role |
 |---|---|
-| `episode_recorder.py` | nó principal: sincroniza `/joint_states` + 3 câmeras, monta state/action, grava via LeRobot |
-| `camera_config.py` | regras de câmera do launch (serial `_XXXX` do driver RealSense, guarda contra 2+ RealSense sem serial) |
-| `joint_layout.py` | layout canônico do vetor (`build_slots(arm=)`: 16 dims `both` ou 8 `left/right`, reindexado de 0) + câmeras por braço + limites do URDF. Fonte única: recorder, validate, replay, runner |
-| `lerobot_writer.py` | wrapper de `LeRobotDataset` (create/resume/add_frame/save/discard/finalize), offline. Recusa retomar dataset de schema diferente |
-| `image_utils.py` | `sensor_msgs` → numpy RGB uint8 sem `cv_bridge` |
-| `xr_buttons.py` | eventos brutos do TeleopXR → START/STOP/DISCARD |
-| `home_mover.py` | leva os braços pra home **suavemente** (trajetória com ~80 waypoints, ease-in-out cosseno, lê a pose atual do `/joint_states`). Gatilho: `/data_collection/go_home` ou botão B |
-| `dataset_replay.py` | republica o `action` gravado nos controllers (teste sem modelo) |
-| `validate_dataset.py` | verificação pós-gravação (detecta o `arm`) |
-| `policy_runner.py` | roda uma policy LeRobot (ACT, SmolVLA…) no robô via ROS; `--arm` p/ checkpoints de 8 dims |
+| `episode_recorder.py` | main node: synchronizes `/joint_states` + 3 cameras, builds state/action, records via LeRobot |
+| `camera_config.py` | launch-time camera rules (RealSense driver `_XXXX` serial, guards against 2+ RealSense without a serial) |
+| `joint_layout.py` | canonical vector layout (`build_slots(arm=)`: 16 dims for `both` or 8 for `left/right`, reindexed from 0) + cameras per arm + URDF limits. Single source of truth: recorder, validate, replay, runner |
+| `lerobot_writer.py` | `LeRobotDataset` wrapper (create/resume/add_frame/save/discard/finalize), offline. Refuses to resume a dataset with a different schema |
+| `image_utils.py` | `sensor_msgs` → numpy RGB uint8 without `cv_bridge` |
+| `xr_buttons.py` | raw TeleopXR events → START/STOP/DISCARD |
+| `home_mover.py` | moves the arms home **smoothly** (trajectory with ~80 waypoints, cosine ease-in-out, reads the current pose from `/joint_states`). Trigger: `/data_collection/go_home` or the B button |
+| `dataset_replay.py` | republishes the recorded `action` to the controllers (test without a model) |
+| `validate_dataset.py` | post-recording check (detects `arm`) |
+| `policy_runner.py` | runs a LeRobot policy (ACT, SmolVLA…) on the robot via ROS; `--arm` for 8-dim checkpoints |
 
-## Robô: v1.0
+## Robot: v1.0
 
-Este robô é **OpenArm v1.0**. Bringup:
+This robot is **OpenArm v1.0**. Bringup:
 
 ```bash
 ros2 launch openarm_bringup openarm.bimanual.launch.py \
@@ -235,23 +247,23 @@ ros2 launch openarm_bringup openarm.bimanual.launch.py \
     right_can_interface:=can0 left_can_interface:=can1
 ```
 
-Nomes das juntas e limites dos braços = iguais ao v2.0. A **garra é prismática**
-(`finger_joint1`, 0–0.044 m) — no v2.0 era revoluta. `joint_layout.py` já está
-com os limites do v1.
+Joint names and arm limits are the same as v2.0. The **gripper is prismatic**
+(`finger_joint1`, 0–0.044 m) — on v2.0 it was revolute. `joint_layout.py` already
+has the v1 limits.
 
-## Pendências / o que revisar
+## Open items / things to review
 
-- **`joint6` (os dois braços) e as duas garras NÃO respondem** a comando via
-  `*_controller/joint_trajectory` (testado 2026-09-09; j1,j2,j4,j5,j7 movem OK).
-  Comando sai no formato certo — provável motor não energizado / sem torque /
-  descalibrado. **Revisar antes de coletar dados** (senão essas dims ficam
-  travadas no dataset).
-- **ros2_control NÃO enforça limites de junta** ("Enforcing command limits is
-  disabled. Command limits from URDF will be ignored") → o **safety wrapper**
-  (clip de delta + limites do URDF) é obrigatório antes de rodar policy.
-- **Garra em unidade crua** do `/joint_states` (metros, 0–0.044). O pipeline CAN
-  de referência usa outra escala — ajuste `gripper_scale`/`gripper_offset` se for
-  misturar datasets.
-- **Zero/sinal das juntas:** assume-se que o `/joint_states` do ros2_control bate
-  com a calibração do pipeline CAN. Conferir com um episódio de referência na
-  mesma pose se for misturar datasets.
+- **`joint6` (both arms) and both grippers do NOT respond** to commands via
+  `*_controller/joint_trajectory` (tested 2026-09-09; j1,j2,j4,j5,j7 move fine).
+  The command is sent in the right format — likely an unpowered / torque-off /
+  uncalibrated motor. **Review before collecting data** (otherwise those dims stay
+  frozen in the dataset).
+- **ros2_control does NOT enforce joint limits** ("Enforcing command limits is
+  disabled. Command limits from URDF will be ignored") → the **safety wrapper**
+  (delta clipping + URDF limits) is mandatory before running a policy.
+- **Gripper in raw units** from `/joint_states` (meters, 0–0.044). The reference
+  CAN pipeline uses a different scale — adjust `gripper_scale`/`gripper_offset` if
+  mixing datasets.
+- **Joint zero/sign:** assumes `/joint_states` from ros2_control matches the CAN
+  pipeline's calibration. Check against a reference episode in the same pose if
+  mixing datasets.
