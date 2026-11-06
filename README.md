@@ -220,7 +220,32 @@ ROS** (not `lerobot-rollout`/`lerobot-eval`, which instantiate the CAN robot and
 conflict with `ros2_control`). The policy runner is a node that subscribes to
 `/joint_states` + cameras, runs `PreTrainedPolicy.from_pretrained`, and publishes to the
 same topics as `dataset_replay` — going through a safety wrapper (delta clipping +
-limits). Not implemented yet.
+limits).
+
+### Running the policy runner
+
+```bash
+ros2 launch openarm_data_collection policy_runner.launch.py \
+    checkpoint:=/home/lilsm/.cache/huggingface/hub/models--openrob-furg--smolvla-openarm-single-pick-place-lego-n200-chest-only/snapshots/d98329c4e05016e5a9a96cefffca0b2b4f0f8a4a \
+    freeze_left:=true \
+    task:="put the lego brick in the box" \
+    n_action_steps:=10 \
+    max_step:=0.04 \
+    ramp_seconds:=2
+```
+
+| Argument | Meaning |
+|---|---|
+| `checkpoint` | Path to the trained policy checkpoint, loaded with `PreTrainedPolicy.from_pretrained`. Here it's a local HuggingFace Hub cache snapshot (`~/.cache/huggingface/hub/models--<org>--<model>/snapshots/<revision>`) for `openrob-furg/smolvla-openarm-single-pick-place-lego-n200-chest-only` — a SmolVLA checkpoint trained on a single-arm, chest-camera-only pick-and-place dataset (lego brick, ~200 episodes). |
+| `freeze_left` | Keeps the left arm held at its current position instead of commanding it from the policy output. Needed here because the checkpoint was trained on a single-arm (right-arm) dataset — its action vector doesn't cover the left arm, so the left arm has to be frozen rather than driven by stale/undefined values. |
+| `task` | The natural-language task instruction passed to the policy on every inference step. SmolVLA is instruction-conditioned, so this string should describe the task the same way it was phrased during data collection (see `task_name:=` in [Usage](#usage)). |
+| `n_action_steps` | Number of future actions the policy predicts per inference call (action-chunking). The runner executes this many steps from one forward pass before querying the model again, instead of re-running inference every control tick. |
+| `max_step` | Maximum per-step joint delta (radians) allowed by the safety wrapper's clipping — the same delta-clipping mentioned above. Commands from the policy are clamped to this size before being published, so a bad prediction can't move the arm further than `max_step` per control cycle. |
+| `ramp_seconds` | Time, in seconds, used to smoothly ramp the commanded motion up from zero when the runner starts, instead of jumping straight to the policy's first predicted action. Avoids a jerky motion at startup if the arm isn't already close to the pose the policy expects. |
+
+As with `dataset_replay`, the checkpoint's action dimension must match the arm(s) being
+driven — a bimanual (16-dim) checkpoint expects both arms active, while a single-arm
+(8-dim) checkpoint like the one above expects the other arm frozen via `freeze_left`/`freeze_right`.
 
 ## Components
 
@@ -235,7 +260,7 @@ limits). Not implemented yet.
 | `home_mover.py` | moves the arms home **smoothly** (trajectory with ~80 waypoints, cosine ease-in-out, reads the current pose from `/joint_states`). Trigger: `/data_collection/go_home` or the B button |
 | `dataset_replay.py` | republishes the recorded `action` to the controllers (test without a model) |
 | `validate_dataset.py` | post-recording check (detects `arm`) |
-| `policy_runner.py` | runs a LeRobot policy (ACT, SmolVLA…) on the robot via ROS; `--arm` for 8-dim checkpoints |
+| `policy_runner.py` | runs a LeRobot policy (ACT, SmolVLA…) on the robot via ROS; `freeze_left`/`freeze_right` for 8-dim checkpoints — see [Running the policy runner](#running-the-policy-runner) |
 
 ## Robot: v1.0
 
